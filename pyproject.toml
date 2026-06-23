@@ -1,0 +1,42 @@
+[project]
+name = "4dct"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "==3.12.3"
+dependencies = [
+	"torch",
+	"torchvision",
+	"torchmetrics",
+	"pillow",
+	"opencv-python",
+	"pydicom",
+	"dicom2nifti",
+	"sqlitedict",
+	"pandas",
+	"nibabel",
+	"tqdm",
+	"monai",
+	"matplotlib",
+	"torch-radon ; sys_platform == 'linux' and python_version == '3.12'",
+	"pybind11",
+	"wandb",
+]
+
+[tool.uv]
+	environments = [
+		"sys_platform == 'linux' and platform_machine == 'x86_64'"
+	]
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchmetrics = { index = "pytorch" }
+torch-radon = { path = "../torch-radon/dist/torch_radon-3.0.0-cp312-cp312-linux_x86_64.whl"}
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+
