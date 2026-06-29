@@ -19,24 +19,30 @@ def train(config: Dict):
         config=config,
     )
     
-    device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-    model = FilterBank(num_spatial=config.get('num_spatial'), num_temporal=config.get('num_temporal')).cuda()
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = FilterBank(num_spatial=config.get('num_spatial'), num_temporal=config.get('num_temporal'), device=device)
     train_dataset = CT4dDataset(
         dataframe=CT4dDataset.generate_dataframe(config.get('train_data')),
-        transforms=CT4dDataset.get_train_transforms(dosage=config.get('dosage', 0.5)),
+        transforms=CT4dDataset.get_train_transforms(),
     )
-    train_dataloader = DataLoader(dataset=train_dataset, batch_size=config.get('batch_size', 1), shuffle=True, num_workers=0, collate_fn=CT4dDataset.collate_fn)
+    train_dataloader = DataLoader(dataset=train_dataset, batch_size=config.get('batch_size', 1), shuffle=False, num_workers=4, collate_fn=CT4dDataset.collate_fn)
     
     validation_dataset = CT4dDataset(
         dataframe=CT4dDataset.generate_dataframe(config.get('validation_data')),
-        transforms=CT4dDataset.get_validation_transforms(dosage=config.get('dosage', 0.5)),
+        transforms=CT4dDataset.get_validation_transforms(),
     )
 
-    validation_dataloader = DataLoader(dataset=validation_dataset, batch_size=config.get('batch_size', 1), shuffle=False, num_workers=0, collate_fn=CT4dDataset.collate_fn)
+    validation_dataloader = DataLoader(dataset=validation_dataset, batch_size=config.get('batch_size', 1), shuffle=False, num_workers=4, collate_fn=CT4dDataset.collate_fn)
     
-    optimizer = torch.optim.Adam(model.parameters(), lr=config.get('lr', 0.001))
-    criterion = torch.nn.HuberLoss().to(device)
+    sigmas_st, sigmas_r = model.parameters()
+    optimizer = torch.optim.Adam([
+        {'params': sigmas_st, 'lr': config.get('lr_st', 0.01)},
+        {'params': sigmas_r, 'lr': config.get('lr_r', 0.005)},
+    ])
+
     scaler = torch.amp.GradScaler(device=device.type)
+
+    criterion = torch.nn.HuberLoss().to(device)
 
     psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
     ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
@@ -57,25 +63,47 @@ def train(config: Dict):
                 scaler.scale(loss).backward()
                 scaler.step(optimizer)
                 scaler.update()
+  
 
             train_pbar.set_postfix(loss=f'{loss.item():.6f}')
             train_loss += loss.item()
 
 
+        kernel_sizes = model.get_kernel_size()
+        for key, value in kernel_sizes.items():
+            wandb.log({
+                f'Train/{key}': value
+            }, commit=False)
+        sigmas = model.get_sigmas()
+
+        for key, value in sigmas.items():
+            wandb.log({
+                f'Train/{key}-mean': sigmas[key]['mean'],
+                f'Train/{key}-std': sigmas[key]['std']
+            }, commit=False)
+
+
         wandb.log({
             'Train/Loss': train_loss / len(train_dataloader),
-        })
-        model.eval()
-        psnr_metric.reset()
-        ssim_metric.reset()
-        val_loss = 0
-        val_images = None
-        val_pbar = tqdm(validation_dataloader, desc=f'Epoch {epoch + 1}/{epochs} [Validation]')
-
+        }, commit=True)
+ 
         if epoch % 2 == 0:
+            model.eval()
+            psnr_metric.reset()
+            ssim_metric.reset()
+            val_loss = 0
+            val_images = None
+            val_pbar = tqdm(validation_dataloader, desc=f'Epoch {epoch + 1}/{epochs} [Validation]')
+
+            cpu_seed = torch.get_rng_state()
+            gpu_seed = torch.cuda.get_rng_state()
+
+            torch.manual_seed(seed=42)
+            torch.cuda.manual_seed(seed=42)
             with torch.no_grad():
                 for i, (clean, noisy) in enumerate(val_pbar):
                     clean, noisy = clean.to(device), noisy.to(device)
+                    
 
                     with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
                         prediction = model(noisy)
@@ -112,12 +140,11 @@ def train(config: Dict):
                         )
 
 
-                    if (i + 1) % 5 == 0:
-                        break
-
+            torch.set_rng_state(cpu_seed)
+            torch.cuda.set_rng_state(gpu_seed)
             val_psnr = psnr_metric.compute().item()
             val_ssim = ssim_metric.compute().item()
-            val_loss = (val_loss / 5) #len(validation_dataloader)).item()
+            val_loss = (val_loss / len(validation_dataloader))
 
             wandb.log({
                 'Validation/Loss': val_loss,
@@ -131,6 +158,8 @@ def train(config: Dict):
             })
 
             print(f'\nEpoch {epoch + 1} Summary: Validation Loss: {val_loss:.6f} | Validation PSNR: {val_psnr:.6f} | Validation SSIM: {val_ssim:.6f}')
+
+
 
     wandb.finish()
 

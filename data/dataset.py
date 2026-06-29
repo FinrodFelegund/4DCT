@@ -1,12 +1,9 @@
 from torch.utils.data import Dataset
 import pandas as pd
-from typing import List
-from typing import Dict
-import glob
-import numpy as np
+from typing import List, Dict
 import torch
 import os
-from pathlib import Path
+from glob import glob
 from monai.transforms import (
     Compose,
     LoadImaged,
@@ -21,26 +18,39 @@ from monai.transforms import (
     EnsureTyped
 )
 from monai.transforms import MapTransform
-from utils import noise
 
-class NoiseTransform(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, dosage: float = 0.5):
+
+
+    
+class OrderChannels(MapTransform):
+    def __init__(self, keys, allow_missing_keys = False):
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
-        self.dosage = dosage
 
     def __call__(self, data: Dict):
-        key = list(data)[0]
-        _, H, _, _ = data[key].shape
-        noisepipeline = noise.SinogramNoise(b_type='Fan-Beam', image_size=H, dosage=self.dosage)
         keys = list(data.keys())
         for key in keys:
-            try:
-                with torch.no_grad():
-                    data[f'{key}_noise'] = noisepipeline(data[key])
-            except Exception as e:
-                raise RuntimeError(str(e))
+            img = data[key]
+            img = img.permute(0, 3, 1, 2)
+            data[key] = img
+
         return data
+    
+class EnsureChannelDimension(MapTransform):
+    def __init__(self, keys, allow_missing_keys = False):
+        self.keys = keys
+        self.allow_missing_keys = allow_missing_keys
+    
+    def __call__(self, data: Dict):
+        keys = list(data.keys())
+        for key in keys:
+            img = data[key]
+            if len(img.shape) != 5:
+                img = img.unsqueeze(0)
+                data[key] = img
+
+        return data
+
 
 class CT4dDataset(Dataset):
 
@@ -60,11 +70,15 @@ class CT4dDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.dataframe.iloc[idx]
-        volumes = sorted(glob.glob(f'{sample['phase_paths']}/phase_*.nii*'))
-        phase_keys = [f'phase_0{i}' for i in range(len(volumes))]
+        clean = sample['clean']
+        noisy = sample['noisy']
+
+        clean_phase_keys = [f'phase_0{i}' for i in range(len(clean))]
+        noisy_phase_keys = [f'noisy_phase_0{i}' for i in range(len(noisy))]
         phase_dict = {}
-        for key, volume in zip(phase_keys, volumes):
-            phase_dict[key] = volume 
+        for key_clean, volume_clean, key_noisy, volume_noisy in zip(clean_phase_keys, clean, noisy_phase_keys, noisy):
+            phase_dict[key_clean] = volume_clean
+            phase_dict[key_noisy] = volume_noisy
 
         data_dicts = [phase_dict]
         tensor4d = self.transforms(data_dicts)
@@ -81,48 +95,53 @@ class CT4dDataset(Dataset):
         
         data_dict = {}
         for dataset in data:
-            for root, dirs, files in os.walk(dataset):
-                for file in files:
-                    if 'phase' in file:
-                        data_dict[root] = file
+            scans = sorted(os.listdir(dataset))
+            for scan in scans:
+                scan_dir = os.path.join(dataset, scan)
+                clean = sorted(glob(f'{scan_dir}/images/phase_**.nii'))
+                noisy = sorted(glob(f'{scan_dir}/noise/noise_phase**.nii'))
+                data_dict[scan] = {
+                    'clean': clean,
+                    'noisy': noisy,
+                }
         
-        return pd.DataFrame(data=list(data_dict.keys()), columns=['phase_paths'])
+        return pd.DataFrame(data_dict).transpose()
     
     @staticmethod
     def collate_fn(data: List[dict]):
         gt_data = [tensor[0]['clean'].as_tensor() for tensor in data]
-        gt_data = torch.stack(gt_data, dim=0).unsqueeze(1)
+        gt_data = torch.stack(gt_data, dim=0)
         noise_data = [tensor[0]['noise'].as_tensor() for tensor in data]
-        noise_data = torch.stack(noise_data, dim=0).unsqueeze(1)
+        noise_data = torch.stack(noise_data, dim=0)
         return gt_data, noise_data
     
     @staticmethod
-    def get_train_transforms(dosage: float = 0.5):
+    def get_train_transforms():
         clean_keys = [f'phase_0{i}' for i in range(10)]
-        noise_keys = [f'phase_0{i}_noise' for i in range(10)]
+        noise_keys = [f'noisy_phase_0{i}' for i in range(10)]
         transforms = Compose([
-            LoadImaged(keys=clean_keys),
-            EnsureChannelFirstd(keys=clean_keys),
+            LoadImaged(keys=clean_keys + noise_keys),
+            EnsureChannelFirstd(keys=clean_keys + noise_keys),
+            Spacingd(
+                keys=clean_keys + noise_keys,
+                pixdim=[1.16, 1.16, 2.5],
+                mode=['bilinear'] * len(clean_keys) * 2,
+            ),
+            SpatialPadd(
+                keys=clean_keys + noise_keys,
+                spatial_size=[32, 32, 32],
+                mode='constant',
+                constant_values=0,
+            ),
+            OrderChannels(keys=clean_keys),
             ScaleIntensityRanged(
-                keys=clean_keys,
+                keys=clean_keys + noise_keys,
                 a_min=-1000,
                 a_max=1000,
                 b_min=0.0,
                 b_max=1.0,
                 clip=True,
             ),
-            Spacingd(
-                keys=clean_keys,
-                pixdim=[1.16, 1.16, 2.5],
-                mode=['bilinear'] * len(clean_keys),
-            ),
-            SpatialPadd(
-                keys=clean_keys,
-                spatial_size=[32, 32, 32],
-                mode='constant',
-                constant_values=0,
-            ),
-            NoiseTransform(keys=clean_keys, dosage=dosage),
             RandSpatialCropd(
                 keys=clean_keys + noise_keys,
                 roi_size=[32, 32, 32],
@@ -138,6 +157,7 @@ class CT4dDataset(Dataset):
                 dim=0,
             ),
             DeleteItemsd(keys=clean_keys + noise_keys),
+            EnsureChannelDimension(keys=['clean', 'noise']),
             EnsureTyped(keys=['clean', 'noise']),
 
         ])
@@ -145,32 +165,32 @@ class CT4dDataset(Dataset):
         return transforms
     
     @staticmethod
-    def get_validation_transforms(dosage: float = 0.5):
+    def get_validation_transforms():
         clean_keys = [f'phase_0{i}' for i in range(10)]
-        noise_keys = [f'phase_0{i}_noise' for i in range(10)]
+        noise_keys = [f'noisy_phase_0{i}' for i in range(10)]
         transforms = Compose([
-            LoadImaged(keys=clean_keys),
-            EnsureChannelFirstd(keys=clean_keys),
+            LoadImaged(keys=clean_keys + noise_keys),
+            EnsureChannelFirstd(keys=clean_keys + noise_keys),
+            Spacingd(
+                keys=clean_keys + noise_keys,
+                pixdim=[1.16, 1.16, 2.5],
+                mode=['bilinear'] * len(clean_keys) * 2,
+            ),
+            SpatialPadd(
+                keys=clean_keys + noise_keys,
+                spatial_size=[32, 32, 32],
+                mode='constant',
+                constant_values=0,
+            ),
+            OrderChannels(keys=clean_keys + noise_keys),
             ScaleIntensityRanged(
-                keys=clean_keys,
+                keys=clean_keys + noise_keys,
                 a_min=-1000,
                 a_max=1000,
                 b_min=0.0,
                 b_max=1.0,
                 clip=True,
             ),
-            Spacingd(
-                keys=clean_keys,
-                pixdim=[1.16, 1.16, 2.5],
-                mode=['bilinear'] * len(clean_keys),
-            ),
-            SpatialPadd(
-                keys=clean_keys,
-                spatial_size=[32, 32, 32],
-                mode='constant',
-                constant_values=0,
-            ),
-            NoiseTransform(keys=clean_keys, dosage=dosage),
             CenterSpatialCropd(
                 keys=clean_keys + noise_keys,
                 roi_size=[32, 32, 32],
@@ -186,6 +206,7 @@ class CT4dDataset(Dataset):
                 dim=0,
             ),
             DeleteItemsd(keys=clean_keys + noise_keys),
+            EnsureChannelDimension(keys=['clean', 'noise']),
             EnsureTyped(keys=['clean', 'noise']),
 
         ])

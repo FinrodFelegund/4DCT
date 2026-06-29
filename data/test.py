@@ -10,8 +10,8 @@ DATASETPATHS = ['/home/dpietsch/Pictures/Inhouse2']
 def iterate_dataset():
     data = CT4dDataset.generate_dataframe(DATASETPATHS)
     
-    ct4d_dataset = CT4dDataset(data, CT4dDataset.get_transforms())
-    tqdm_dataloader = tqdm(DataLoader(ct4d_dataset, batch_size=1, num_workers=1, collate_fn=CT4dDataset.collate_fn))
+    ct4d_dataset = CT4dDataset(data, CT4dDataset.get_train_transforms())
+    tqdm_dataloader = tqdm(DataLoader(ct4d_dataset, batch_size=1, num_workers=4, collate_fn=CT4dDataset.collate_fn))
 
     for gt, noise in tqdm_dataloader:
         tqdm_dataloader.set_description(f'Shape gt: {gt.shape} shape noise: {noise.shape}, Type: {type(gt)}')

@@ -30,15 +30,14 @@ class SinogramNoise(BaseClassNoise):
             angles = np.linspace(0, 2*np.pi, num=720, endpoint=False)
             self.radon = FanBeam(self.det_count, angles)
 
-        self.device = torch.device('cuda:1')
+        self.device = torch.device('cuda:0')
 
     def forward(self, x: torch.Tensor):
         """
         Radon forward expects data to have shape [d1, ..., dn, self.image_size, self.image_size].
-        Assumes Images to be in shape [H, W, Z]
+        Assumes Images to be in shape [D, H, W]
         """
         
-        x = x.permute(2, 0, 1,)
         sinogram = self.radon.forward(x)
 
         return sinogram
@@ -47,7 +46,7 @@ class SinogramNoise(BaseClassNoise):
         """Return filtered backprojection of the Radon Transform."""
         x = self.radon.filter_sinogram(x)
         x = self.radon.backward(x)
-        x = x.permute(1, 2, 0)
+
         return x
 
     def add_noise(self, x: torch.Tensor, max_attenuation: float = 5.0):
@@ -64,13 +63,10 @@ class SinogramNoise(BaseClassNoise):
         return x
     
     def __call__(self, x: torch.Tensor):
-        x = x.squeeze(0)
-        x = x.to(device=self.device)
         x = self.forward(x)
         x = self.add_noise(x)
         x = self.backward(x)
-        x = x.clamp(min=0.0, max=1.0).cpu()
-        x = x.unsqueeze(0)
+        x = x.clamp(min=0.0, max=1.0)
         return x
 
     
