@@ -1,14 +1,17 @@
 import yaml
 import argparse
 from data.test import test
+from data.dataset import cacheDataSet
 from train_spbf import train
 import os
+import torch
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser('')
     parser.add_argument('--test', action='store_true')
     parser.add_argument('--train', action='store_true')
+    parser.add_argument('--cache', action='store_true')
     parser.add_argument('-f', required=False, help='Path to a config.yaml file', type=os.path.abspath)
     parser.add_argument('--inference', action='store_true')
 
@@ -27,9 +30,10 @@ def main():
         train(config)
     elif args.inference:
         pass
+    elif args.cache:
+        cacheDataSet()
     else:
         raise RuntimeError('No known argument provided')
-
 
 
 

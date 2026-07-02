@@ -15,26 +15,41 @@ class BoundedSoftplus(torch.nn.Module):
         x = torch.nn.functional.softplus(x, beta=self.beta)
         x = torch.clamp(x, max=self.threshold)
         return x + 1e-6
+    
+def inverse_sigmoid(y, min_value = 1e-3, max_value = 6.0):
+    y = (y - min_value) / (max_value - min_value)
+    return np.log(y / (1 - y))
+    
+class BoundedSigmoid(torch.nn.Module):
+    def __init__(self, min_value=1e-3, max_value=6.0):
+        super(BoundedSigmoid, self).__init__()
+        self.min_value = min_value
+        self.max_value = max_value
+
+    def forward(self, x):
+        return self.min_value + (self.max_value - self.min_value) * torch.sigmoid(x)
+
 
 
 class SpatialFilter(torch.nn.Module):
     
-    def __init__(self, sigma_sx, sigma_sy, sigma_sz, sigma_r, device):
+    def __init__(self, sigma_sx, sigma_sy, sigma_sz, sigma_r, std_multiplier, device):
         super(SpatialFilter, self).__init__()
-
-
 
         self.kernel_size = None
         self.pad = None
-        self.sigma_sx = torch.nn.Parameter(torch.tensor(inverse_softplus(sigma_sx), dtype=torch.float32, device=device), requires_grad=True)
-        self.sigma_sy = torch.nn.Parameter(torch.tensor(inverse_softplus(sigma_sy), dtype=torch.float32, device=device), requires_grad=True)
-        self.sigma_sz = torch.nn.Parameter(torch.tensor(inverse_softplus(sigma_sz), dtype=torch.float32, device=device), requires_grad=True)
-        self.sigma_r = torch.nn.Parameter(torch.tensor(inverse_softplus(sigma_r), dtype=torch.float32, device=device), requires_grad=True)
+        self.sigma_sy = torch.nn.Parameter(torch.tensor(inverse_sigmoid(sigma_sy, max_value=1.5), dtype=torch.float32, device=device), requires_grad=True)
+        self.sigma_sx = torch.nn.Parameter(torch.tensor(inverse_sigmoid(sigma_sx, max_value=1.5), dtype=torch.float32, device=device), requires_grad=True)
+        self.sigma_sz = torch.nn.Parameter(torch.tensor(inverse_sigmoid(sigma_sz, max_value=1.5), dtype=torch.float32, device=device), requires_grad=True)
+        self.sigma_r = torch.nn.Parameter(torch.tensor(inverse_sigmoid(sigma_r, max_value=6.0), dtype=torch.float32, device=device), requires_grad=True)
 
-        self.spatial_activation = BoundedSoftplus(threshold=1.5)
-        self.range_activation = BoundedSoftplus(threshold=6.0)
-        self.std_multiplier = 3
+        self.spatial_activation = BoundedSigmoid(max_value=1.5)
+        self.range_activation = BoundedSigmoid(max_value=6.0)
+        self.std_multiplier = std_multiplier
         self.device = device
+
+        self.register_buffer('spatial_kernel_cache', None)
+        self.register_buffer('last_spatial_params', None)
 
     def _get_activated_sigmas(self):
         sigma_sx = self.spatial_activation(self.sigma_sx)
@@ -50,22 +65,34 @@ class SpatialFilter(torch.nn.Module):
         sigma_sx, sigma_sy, sigma_sz, _ = self._get_activated_sigmas()
         max_sigma = max([sigma_sx.item(), sigma_sy.item(), sigma_sz.item()])
         kernel_size = int(2 * np.ceil(max_sigma * self.std_multiplier) + 1)
-        kernel_size = max(3, kernel_size)
+        kernel_size = min(11, max(3, kernel_size))
         kernel_size = kernel_size + 1 if kernel_size % 2 == 0 else kernel_size
         self.kernel_size = kernel_size
         self.pad = kernel_size // 2
 
     def _compute_spatial_kernel(self):
         sigma_sx, sigma_sy, sigma_sz, _ = self._get_activated_sigmas()
+
+        current_params = torch.stack([sigma_sx, sigma_sy, sigma_sz])
+        if (self.spatial_kernel_cache is not None and
+            self.last_spatial_params is not None and
+            self.spatial_kernel_cache.shape[0] == self.kernel_size and
+            torch.allclose(current_params, self.last_spatial_params)) and not self.training:
+            return self.spatial_kernel_cache
+
         coords = [torch.arange(-(self.kernel_size // 2), (self.kernel_size // 2) + 1, device=self.device) for _ in range(3)]
         coords = torch.meshgrid(*coords, indexing='ij')
         exponent = (
-            -(coords[2].float() ** 2) / (2 * sigma_sx ** 2) +
-            -(coords[1].float() ** 2) / (2 * sigma_sy ** 2) +
-            -(coords[0].float() ** 2) / (2 * sigma_sz ** 2)
+            -(coords[2].float() ** 2) / (2 * sigma_sx**2) +
+            -(coords[1].float() ** 2) / (2 * sigma_sy**2) +
+            -(coords[0].float() ** 2) / (2 * sigma_sz**2)
         )
 
         spatial_kernel = torch.exp(exponent)
+
+        self.spatial_kernel_cache = spatial_kernel
+        self.last_spatial_params = current_params.detach()
+
         return spatial_kernel
     
     def get_kernel_size(self):
@@ -80,8 +107,7 @@ class SpatialFilter(torch.nn.Module):
     def forward(self, x: torch.Tensor):
         if not x.dim() == 5:
             raise ValueError(f'Input must be a 5D tensor. Got shape: {x.shape}')
-        x = x.float()
-
+  
         self._update_kernel_size()
 
         B, C, D, H, W = x.shape
@@ -106,19 +132,22 @@ class SpatialFilter(torch.nn.Module):
 
 
 class TemporalFilter(torch.nn.Module):
-    def __init__(self, sigma_t, sigma_r, device):
+    def __init__(self, sigma_t, sigma_r, std_multiplier, device):
         super(TemporalFilter, self).__init__()
 
         self.kernel_size = None
         self.pad = None
 
-        self.sigma_t = torch.nn.Parameter(torch.tensor(inverse_softplus(sigma_t), dtype=torch.float32, device=device), requires_grad=True)
-        self.sigma_r = torch.nn.Parameter(torch.tensor(inverse_softplus(sigma_r), dtype=torch.float32, device=device), requires_grad=True)
+        self.sigma_t = torch.nn.Parameter(torch.tensor(inverse_sigmoid(sigma_t, max_value=1.5), dtype=torch.float32, device=device), requires_grad=True)
+        self.sigma_r = torch.nn.Parameter(torch.tensor(inverse_sigmoid(sigma_r, max_value=6.0), dtype=torch.float32, device=device), requires_grad=True)
         
-        self.temporal_activation = BoundedSoftplus(threshold=1.5)
-        self.range_activation = BoundedSoftplus(threshold=6.0)
-        self.std_multiplier = 3
+        self.temporal_activation = BoundedSigmoid(max_value=1.5)
+        self.range_activation = BoundedSigmoid(max_value=6.0)
+        self.std_multiplier = std_multiplier
         self.device = device
+
+        self.register_buffer('temporal_kernel_cache', None)
+        self.register_buffer('last_temporal_params', None)
 
     def _get_activated_sigmas(self):
         sigma_st = self.temporal_activation(self.sigma_t)
@@ -132,23 +161,33 @@ class TemporalFilter(torch.nn.Module):
     def _update_kernel_size(self):
         sigma_t, _ = self._get_activated_sigmas()
         kernel_size = int(2 * np.ceil(sigma_t.item() * self.std_multiplier) + 1)
-        kernel_size = max(3, kernel_size)
+        kernel_size = min(9, max(3, kernel_size))
         kernel_size = kernel_size + 1 if kernel_size % 2 == 0 else kernel_size
         self.kernel_size = kernel_size
         self.pad = kernel_size // 2
 
     def _compute_temporal_kernel(self):
         sigma_t, _ = self._get_activated_sigmas()
+
+        current_params = torch.stack([sigma_t], dim=0)
+        if (self.temporal_kernel_cache is not None and
+            self.last_temporal_params is not None and
+            self.temporal_kernel_cache.shape[0] == self.kernel_size and
+            torch.allclose(current_params, self.last_temporal_params)) and not self.training:
+            return self.temporal_kernel_cache
+
         coords = torch.arange(-(self.kernel_size // 2), (self.kernel_size // 2) + 1, device=self.device)
-        exponent = -(coords.float() ** 2) / (2 * sigma_t ** 2)
+        exponent = -(coords.float() ** 2) / (2 * sigma_t**2)
         temporal_kernel = torch.exp(exponent)
 
+        self.temporal_kernel_cache = temporal_kernel
+        self.last_temporal_params = current_params.detach()
         return temporal_kernel
     
     def _compute_range_kernel(self, center_values, neighbors):
         _, sigma_r = self._get_activated_sigmas()
         difference = center_values - neighbors
-        exponent = -(difference ** 2) / (2 * sigma_r ** 2)
+        exponent = -(difference ** 2) / (2 * sigma_r**2)
         range_kernel = torch.exp(exponent)
         
         return range_kernel
@@ -161,20 +200,23 @@ class TemporalFilter(torch.nn.Module):
             raise ValueError(f'Input must be a 6D tensor. Got shape {x.shape}')
 
         self._update_kernel_size()
+        output = torch.empty_like(x)
 
-   
-        B, C, T, D, H, W = x.shape
-        x = x.permute(0, 3, 4, 5, 1, 2).view(B * D * H * W, C, T)
-        x_pad = torch.nn.functional.pad(x, [self.pad]*2, mode='reflect')
-        patches = x_pad.unfold(2, self.kernel_size, 1)
+        for i in range(x.shape[0]):
+            x_s = x[i:i+1]
+            B, C, T, D, H, W = x_s.shape
+            x_s = x_s.permute(0, 3, 4, 5, 1, 2).contiguous().view(B * D * H * W, C, T)
+            x_pad = torch.nn.functional.pad(x_s, [self.pad]*2, mode='reflect')
+            patches = x_pad.unfold(2, self.kernel_size, 1)
     
-        temporal_kernel = self._compute_temporal_kernel().view(1, 1, 1, -1)
-        range_kernel = self._compute_range_kernel(x.unsqueeze(-1), patches)
-        kernel = temporal_kernel * range_kernel
-        kernel = kernel / (kernel.sum(dim=-1, keepdim=True) + 1e-8)
-        filtered = (patches * kernel).sum(dim=-1).view(B, D, H, W, C, T).permute(0, 4, 5, 1, 2, 3)
+            temporal_kernel = self._compute_temporal_kernel().view(1, 1, 1, -1)
+            range_kernel = self._compute_range_kernel(x_s.unsqueeze(-1), patches)
+            kernel = temporal_kernel * range_kernel
+            kernel = kernel / (kernel.sum(dim=-1, keepdim=True) + 1e-8)
+            output[i:i+1] = (patches * kernel).sum(dim=-1).view(B, D, H, W, C, T).permute(0, 4, 5, 1, 2, 3)
+            del patches, kernel
         
-        return filtered
+        return output
 
 
 class FilterBank(torch.nn.Module):
@@ -184,26 +226,32 @@ class FilterBank(torch.nn.Module):
             sigma_sx=0.5,
             sigma_sy=0.5,
             sigma_sz=0.5,
-            sigma_r=0.01,
+            sigma_r=0.1,
+            std_multiplier=3,
             device=device,
         ) for _ in range(num_spatial)])
 
         self.temporal_kernels = torch.nn.ModuleList([TemporalFilter(
             sigma_t=0.5,
             sigma_r=0.1,
+            std_multiplier=3,
             device=device,
         ) for _ in range(num_temporal)])
 
     def forward(self, x):
         B, C, T, D, H, W = x.shape
         x = x.view(B*T, C, D, H, W)
-        for stage in self.spatial_kernels:
-            x = stage(x)
+        try:
+            s_stage = 0
+            t_stage = 0
+            for s_stage, stage in enumerate(self.spatial_kernels):
+                x = stage(x)
 
-        x = x.view(B, C, T, D, H, W)
-        for stage in self.temporal_kernels:
-            x = stage(x)
-
+            x = x.view(B, C, T, D, H, W)
+            for t_stage, stage in enumerate(self.temporal_kernels):
+                x = stage(x)
+        except Exception as e:
+            raise RuntimeError(f'At s_stage: {s_stage}, t_stage: {t_stage}, {str(e)}')
         return x
     
     def parameters(self, recurse = True):
@@ -221,31 +269,39 @@ class FilterBank(torch.nn.Module):
 
         return st_sigmas, range_sigmas
     
-    def get_sigmas(self):
-        sigmas = {}
-        for i, spatial_kernel in enumerate(self.spatial_kernels):
-            sigma_sx, sigma_sy, sigma_sz, sigma_r = spatial_kernel._get_raw_sigmas()
-            sigma_list = np.array([sigma_sx.item(), sigma_sy.item(), sigma_sz.item(), sigma_r.item()])
-            sigmas[f'spatial_kernel_{i+1}'] = {
-                'mean': sigma_list.mean(),
-                'std': sigma_list.std()
-            }
-        for i, temporal_kernel in enumerate(self.temporal_kernels):
-            sigma_t, sigma_r = temporal_kernel._get_raw_sigmas()
-            sigma_list = np.array([sigma_t.item(), sigma_r.item()])
-            sigmas[f'temporal_kernel_{i+1}'] = {
-                'mean': sigma_list.mean(),
-                'std': sigma_list.std(),
-            }
+    def get_sigmas_by_type(self):
+        data = {
+            'spatial_sx': [], 'spatial_sy': [], 'spatial_sz': [], 'spatial_r': [],
+            'temporal_t': [], 'temporal_r': [],
+        }
+
+        for spatial_kernel in self.spatial_kernels:
+            sx, sy, sz, sr = spatial_kernel._get_activated_sigmas()
+            data['spatial_sx'].append(sx.item())
+            data['spatial_sy'].append(sy.item())
+            data['spatial_sz'].append(sz.item())
+            data['spatial_r'].append(sr.item())
+
+        for temporal_kernel in self.temporal_kernels:
+            st, sr = temporal_kernel._get_activated_sigmas()
+            data['temporal_t'].append(st.item())
+            data['temporal_r'].append(sr.item())
         
-        return sigmas
+        return data
 
     def get_kernel_size(self):
         kernel_sizes = {}
         for i, spatial_kernel in enumerate(self.spatial_kernels):
-            kernel_sizes[f'spatial_kernel_{i}_kernel_size'] = spatial_kernel.get_kernel_size()
+            kernel_sizes[f'spatial_kernel_{i+1}_kernel_size'] = spatial_kernel.get_kernel_size()
 
         for i, temporal_kernel in enumerate(self.temporal_kernels):
-            kernel_sizes[f'temporal_kernel_{i}_kernel_size'] = temporal_kernel.get_kernel_size()
+            kernel_sizes[f'temporal_kernel_{i+1}_kernel_size'] = temporal_kernel.get_kernel_size()
 
         return kernel_sizes
+    
+    def __repr__(self):
+        num_spatial = len(self.spatial_kernels)
+        num_temporal = len(self.temporal_kernels)
+
+        return f'Number of spatial Kernels: {num_spatial} | Number of temporal kernels: {num_temporal}'
+

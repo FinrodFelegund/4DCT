@@ -49,7 +49,7 @@ class SinogramNoise(BaseClassNoise):
 
         return x
 
-    def add_noise(self, x: torch.Tensor, max_attenuation: float = 5.0):
+    def add_noise(self, x: torch.Tensor, max_attenuation: float = 5.0, gaussian=None):
         """Returns Poisson noise added sinograms."""
 
         current_max = x.max()

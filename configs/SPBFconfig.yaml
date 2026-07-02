@@ -5,6 +5,6 @@ lr_r: 0.005
 batch_size: 1
 num_spatial: 2
 num_temporal: 1
-train_data: /home/dpietsch/Pictures/Inhouse1
-validation_data: /home/dpietsch/Pictures/Inhouse2
+train_data: /home/dpietsch/Pictures/.cache/Inhouse1Processed
+validation_data: /home/dpietsch/Pictures/.cache/Inhouse2Processed
 
