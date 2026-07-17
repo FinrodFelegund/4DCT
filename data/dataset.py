@@ -18,7 +18,7 @@ from monai.transforms import (
     DeleteItemsd,
     EnsureTyped,
     Orientationd,
-    CropForegroundd,
+
 )
 
 from .CustomTransforms import (
@@ -26,8 +26,12 @@ from .CustomTransforms import (
     EnsureChannelDimension,
     EnsureBatchDimension,
     CacheDataSet,
-    CropBatch,
+    CropBatchTrain,
+    CropBatchValidation,
     GenerateNoiseScans,
+    CustomForegroundCrop,
+    PadToSquare,
+    MidSlice,
 )
 
 class CT4dDataset(Dataset):
@@ -35,12 +39,14 @@ class CT4dDataset(Dataset):
     def __init__(
             self,
             dataframe: pd.DataFrame,
-            transforms: List[None]
+            transforms: List[None],
+            scan_transforms: List[None] | None = None
               ):
         
         self.dataframe = dataframe
         self.len = len(self.dataframe)
         self.transforms = transforms
+        self.scan_transforms = scan_transforms
 
 
     def __len__(self):
@@ -49,17 +55,39 @@ class CT4dDataset(Dataset):
     def __getitem__(self, idx):
         sample = self.dataframe.iloc[idx]
         clean = sample['clean']
+        noisy = sample['noise']
         scan = sample['scan']
 
         clean_phase_keys = [f'phase_0{i}' for i in range(len(clean))]
+        noisy_phase_keys = [f'noisy_phase_0{i}' for i in range(len(noisy))]
         phase_dict = {}
-        for key_clean, volume_clean in zip(clean_phase_keys, clean):
+        for key_clean, volume_clean, key_noisy, volume_noisy in zip(clean_phase_keys, clean, noisy_phase_keys, noisy):
             phase_dict[key_clean] = volume_clean
+            phase_dict[key_noisy] = volume_noisy
         phase_dict['scan'] = scan
 
         tensor4d = self.transforms(phase_dict)
 
         return tensor4d
+    
+    
+    def get_whole_slice(self, idx: int = 0):
+        sample = self.dataframe.iloc[idx]
+        clean = sample['clean']
+        noisy = sample['noise']
+        scan = sample['scan']
+
+        clean_phase_keys = [f'phase_0{i}' for i in range(len(clean))]
+        noisy_phase_keys = [f'noisy_phase_0{i}' for i in range(len(noisy))]
+        phase_dict = {}
+        for key_clean, volume_clean, key_noisy, volume_noisy in zip(clean_phase_keys, clean, noisy_phase_keys, noisy):
+            phase_dict[key_clean] = volume_clean
+            phase_dict[key_noisy] = volume_noisy
+        phase_dict['scan'] = scan
+
+        tensor4d = self.scan_transforms(phase_dict)
+        return tensor4d['clean'].as_tensor(), tensor4d['noise'].as_tensor()
+
 
 
     @staticmethod
@@ -74,9 +102,11 @@ class CT4dDataset(Dataset):
             scans = sorted(os.listdir(dataset))
             for scan in scans:
                 scan_dir = os.path.join(dataset, scan)
-                clean = sorted(glob(f'{scan_dir}/images/phase_**.nii'))
+                clean = sorted(glob(f'{scan_dir}/images/phase_**.npy'))
+                noisy = sorted(glob(f'{scan_dir}/noise/noisy_phase_**.npy'))
                 data_dict[scan] = {
                     'clean': clean,
+                    'noise': noisy,
                     'scan': scan,
                 }
         
@@ -126,7 +156,7 @@ class CT4dDataset(Dataset):
             DeleteItemsd(keys=clean_keys + noise_keys),
             EnsureChannelDimension(keys=['clean', 'noise']),
             EnsureTyped(keys=['clean', 'noise']),
-            CropBatch(keys=clean_keys + noise_keys, num_crops=4)
+            CropBatchTrain(keys=['clean', 'noise'], num_crops=4)
         ])
 
         return transforms
@@ -149,14 +179,42 @@ class CT4dDataset(Dataset):
             ),
             DeleteItemsd(keys=clean_keys + noise_keys),
             EnsureChannelDimension(keys=['clean', 'noise']),
-            EnsureBatchDimension(keys=['clean', 'noise']),
+            #EnsureBatchDimension(keys=['clean', 'noise']),
             EnsureTyped(keys=['clean', 'noise']),
+            CropBatchValidation(keys=['clean', 'noise'])
+        ])
+
+        return transforms
+    
+    @staticmethod
+    def get_scan_transforms():
+        clean_keys = [f'phase_0{i}' for i in range(10)]
+        noise_keys = [f'noisy_phase_0{i}' for i in range(10)]
+        transforms = Compose([
+            LoadImaged(keys=clean_keys + noise_keys),
+            ConcatItemsd(
+                keys=clean_keys,
+                name='clean',
+                dim=0,
+            ),
+            ConcatItemsd(
+                keys=noise_keys,
+                name='noise',
+                dim=0,
+            ),
+            DeleteItemsd(keys=clean_keys + noise_keys),
+            EnsureChannelDimension(keys=['clean', 'noise']),
+            #EnsureBatchDimension(keys=['clean', 'noise']),
+            EnsureTyped(keys=['clean', 'noise']),
+            MidSlice(keys=['clean', 'noise']),
         ])
 
         return transforms
     
     @staticmethod
     def get_cache_transforms(destination: str):
+        PIXEL_SIZE_IN_MM = 1.16
+        HU_MIN, HU_MAX = -1024.0, 3000.0
         clean_keys = [f'phase_0{i}' for i in range(10)]
         noise_keys = [f'noisy_phase_0{i}' for i in range(10)]
         transforms = Compose([
@@ -165,26 +223,28 @@ class CT4dDataset(Dataset):
             Orientationd(keys=clean_keys, axcodes='RAS'),
             Spacingd(
                 keys=clean_keys,
-                pixdim=[1.16, 1.16, 2.5],
+                pixdim=[PIXEL_SIZE_IN_MM, PIXEL_SIZE_IN_MM, 2.5],
                 mode=['bilinear'] * len(clean_keys),
             ),
-            CropForegroundd(keys=clean_keys, select_fn=lambda x: x > -800, source_key='image'),
+            CustomForegroundCrop(keys=clean_keys, threshold_hu=-800.0),
+            ScaleIntensityRanged(
+                keys=clean_keys,
+                a_min=HU_MIN,
+                a_max=HU_MAX,
+                b_min=0.0,
+                b_max=1.0,
+                clip=True,
+            ),
             SpatialPadd(
                 keys=clean_keys,
                 spatial_size=[32, 32, 32],
                 mode='constant',
-                constant_values=0,
+                constant_values=0.0,
             ),
+            # (C, H, W, D) -> (C, D, H, W)
             OrderChannels(keys=clean_keys),
-            ScaleIntensityRanged(
-                keys=clean_keys,
-                a_min=--1024,
-                a_max=3000,
-                b_min=-1024,
-                b_max=3000,
-                clip=True,
-            ),
-            GenerateNoiseScans(keys=clean_keys),
+            PadToSquare(keys=clean_keys, pad_value=0.0, multiple_of=16),
+            GenerateNoiseScans(keys=clean_keys, dosage=0.25, pixel_size_mm=PIXEL_SIZE_IN_MM),
             CacheDataSet(keys=clean_keys + noise_keys, destination=destination)
         ])
 
@@ -202,7 +262,7 @@ def cacheDataSet():
         dataframe = CT4dDataset.generate_dataframe(dataset)
         cache_transforms = CT4dDataset.get_cache_transforms(destination=destination)
         dataset = CT4dDataset(dataframe=dataframe, transforms=cache_transforms)
-        dataloader = torch.utils.data.DataLoader(dataset=dataset, shuffle=False, num_workers=0, collate_fn=CT4dDataset.cache_collate)
+        dataloader = torch.utils.data.DataLoader(dataset=dataset, shuffle=False, num_workers=2, collate_fn=CT4dDataset.cache_collate)
         tqdm_loader = tqdm(dataloader)
         for index, out in enumerate(tqdm_loader):
             keys = list(out.keys())

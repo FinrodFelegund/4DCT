@@ -27,7 +27,8 @@ def train(config: Dict):
     
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = FilterBank(num_spatial=config.get('num_spatial'), num_temporal=config.get('num_temporal'), device=device)
+    model = FilterBank(num_spatial=config.get('num_spatial'), num_temporal=config.get('num_temporal'))
+    model = model.to(device)
 
     train_dataset = CT4dDataset(
         dataframe=CT4dDataset.generate_dataframe(config.get('train_data')),
@@ -38,15 +39,18 @@ def train(config: Dict):
     validation_dataset = CT4dDataset(
         dataframe=CT4dDataset.generate_dataframe(config.get('validation_data')),
         transforms=CT4dDataset.get_validation_transforms(),
+        scan_transforms=CT4dDataset.get_scan_transforms(),
     )
 
     validation_dataloader = DataLoader(dataset=validation_dataset, batch_size=config.get('batch_size', 1), shuffle=False, num_workers=1, collate_fn=CT4dDataset.collate_fn)
     
-    sigmas_st, sigmas_r = model.parameters()
+    range_sigmas = [p for n, p in model.named_parameters() if n.endswith('sigma_r')]
+    st_sigmas   = [p for n, p in model.named_parameters() if not n.endswith('sigma_r')]
     optimizer = torch.optim.Adam([
-        {'params': sigmas_st, 'lr': config.get('lr_st', 0.0005)},
-        {'params': sigmas_r, 'lr': config.get('lr_r', 0.01)},
+        {'params': st_sigmas, 'lr': config.get('lr_st', 0.01)},
+        {'params': range_sigmas, 'lr': config.get('lr_r', 0.01)},
     ])
+
 
     scaler = torch.amp.GradScaler(device=device.type)
 
@@ -69,11 +73,18 @@ def train(config: Dict):
                 prediction = model(noisy)
                 loss = criterion(prediction, clean)
 
-                scaler.scale(loss).backward()
-                p_1, p_2 = model.parameters()
-                torch.nn.utils.clip_grad_norm_(p_1 + p_2, max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            scaler.step(optimizer)
+            scaler.update()
+
+            with torch.no_grad():
+                for name, param in model.named_parameters():
+                    if name.endswith('sigma_r'):
+                        param.clamp_(min=0.01)
+                    else:
+                        param.clamp_(min=0.01, max=2.0)
 
             kernel_sizes = model.get_kernel_size()
             wandb_dict = {}
@@ -84,7 +95,11 @@ def train(config: Dict):
                     wandb_dict[key] = sigma_value
 
             for key, value in kernel_sizes.items():
-                wandb_dict[f'Kernels/{key}'] = value
+                if isinstance(value, tuple):
+                    for axis, k in zip(('z', 'y', 'x'), value):
+                        wandb_dict[f'Kernels/{key}_{axis}'] = k
+                else:
+                    wandb_dict[f'Kernels/{key}'] = value
 
             wandb_dict['Train/Loss'] = loss.item()
  
@@ -108,90 +123,39 @@ def train(config: Dict):
             psnr_metric.reset()
             ssim_metric.reset()
             val_loss = 0
-            val_images = None
+            n_batches = 0
             val_pbar = tqdm(validation_dataloader, desc=f'Epoch {epoch + 1}/{epochs} [Validation]')
 
 
             with torch.no_grad():
-                norm_factor = 0
                 for i, (clean, noisy) in enumerate(val_pbar):
-                    
-                    full_pred = torch.zeros_like(clean, device='cpu', dtype=torch.float32)
-                    count_map = torch.zeros_like(clean, device='cpu', dtype=torch.float32)
-                    B, C, T, D, H, W = clean.shape
-                    d_offsets, h_offsets, w_offsets, num_patches = compute_patch_offsets(D, H, W, patch_size=32, window_step=16)
 
-                    
+                    patch_batch_size = 4
 
-                    patch_batch_size = 16
-                    batch_noisy = []
-                    batch_clean = []
-                    batch_coords = []
-
-                    all_coords = [(d, h, w) for d in d_offsets for h in h_offsets for w in w_offsets]
 
                     with torch.amp.autocast(device_type=device.type, dtype=torch.float16):
-                        for idx, (d, h, w) in enumerate(all_coords):
-                            batch_clean.append(clean[:, :, :, d:d+32, h:h+32, w:w+32])
-                            batch_noisy.append(noisy[:, :, :, d:d+32, h:h+32, w:w+32])
-                            batch_coords.append((d, h, w))
+                        for idx in range(0, clean.shape[0], patch_batch_size):
+                            batch_clean, batch_noisy = clean[idx:idx+patch_batch_size, ...].to(device), noisy[idx:idx+patch_batch_size, ...].to(device)
+                            batch_prediction = model(batch_noisy)
+                            val_loss += criterion(batch_prediction, batch_clean)
+                            n_batches += 1
+                            psnr_metric.update(batch_prediction, batch_clean)
 
-                            is_last_patch = (idx == len(all_coords) - 1)
-
-                            if len(batch_noisy) == patch_batch_size or is_last_patch:
-                                clean_patches = torch.cat(batch_clean, dim=0).to(device)
-                                noisy_patches = torch.cat(batch_noisy, dim=0).to(device)
-                                prediction = model(noisy_patches)
-                                val_loss += criterion(prediction, clean_patches).item() * len(clean_patches)
-                                norm_factor += len(clean_patches)
+                            B, C, T, D, H, W = batch_prediction.shape
+                            ssim_metric.update(batch_prediction.view(B*T*D, C, H, W), batch_clean.view(B*T*D, C, H, W))
 
 
+                            val_pbar.set_postfix(Info=f'Image: {i+1} | Batch: { idx // patch_batch_size + 1} / {clean.shape[0] // patch_batch_size} | Shape: {clean.shape}')
 
-                                psnr_metric.update(prediction, clean_patches)
-
-                                B, C, T, D, H, W = prediction.shape
-
-                                ssim_metric.update(prediction.view(B*T*D, C, H, W), clean_patches.view(B*T*D, C, H, W))
-
-                                prediction_f32 = prediction.float()
-    
-
-                                if val_images == None:
-                                    for batch_idx, (pd, ph, pw) in enumerate(batch_coords):
-                                        full_pred[:, :, :, pd:pd+32, ph:ph+32, pw:pw+32] += prediction_f32[batch_idx:batch_idx+1].detach().cpu()
-                                        count_map[:, :, :, pd:pd+32, ph:ph+32, pw:pw+32] += 1 
-                                
-                                batch_clean.clear()
-                                batch_noisy.clear()
-                                batch_coords.clear()
-
-                            val_pbar.set_postfix(Info=f'Image: {i+1} | Patch: {idx} / {len(all_coords)} | Shape: {clean.shape}')
-
-                                    
-
-
-
-
-
-                    if val_images == None:
-                        full_pred = full_pred / (count_map + 1e-8)
-                        T, D = full_pred.shape[2], full_pred.shape[3]
-
-                        t_mid = T // 2
-                        d_mid = D // 2
-
-                        clean_slice = clean[:, :, t_mid, d_mid, :, :].cpu().float()
-                        noise_slice = noisy[:, :, t_mid, d_mid, :, :].cpu().float()
-                        pred_slice = full_pred[:, :, t_mid, d_mid, :, :]
-                        
-                        val_images = torch.cat([clean_slice, noise_slice, pred_slice], dim=0)
-                        val_images = make_grid(val_images, nrow=3, normalize=False)
-                        del full_pred, count_map
-
+                        clean, noisy = validation_dataset.get_whole_slice()
+                        clean, noisy = clean.to(device), noisy.to(device)
+                        pred = model(noisy)
+                        val_image = torch.cat([clean[:, :, 0, 0, :, :], pred[:, :, 0, 0, :, :], noisy[:, :, 0, 0, :, :]], dim=0)
+                        val_image = make_grid(val_image, nrow=3, normalize=False)
 
             val_psnr = psnr_metric.compute().item()
             val_ssim = ssim_metric.compute().item()
-            val_loss = (val_loss / norm_factor)
+            val_loss = (val_loss / n_batches)
 
             wandb.log({
                 'Validation/Loss': val_loss,
@@ -199,14 +163,12 @@ def train(config: Dict):
                 'Validation/ssim': val_ssim,
                 'Validation/Epoch': epoch + 1,
                 'Validation/Images': wandb.Image(
-                    val_images,
-                    caption=f'Epoch {epoch+1} | T={t_mid}, Z={d_mid}'
+                    val_image,
+                    caption=f'Epoch {epoch+1}'
                 )
             })
 
             print(f'\nEpoch {epoch + 1} Summary: Validation Loss: {val_loss:.6f} | Validation PSNR: {val_psnr:.6f} | Validation SSIM: {val_ssim:.6f}')
-
-
 
     wandb.finish()
 

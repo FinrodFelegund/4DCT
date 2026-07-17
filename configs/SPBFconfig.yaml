@@ -1,10 +1,10 @@
 name: SPBF_Filterbank_Tests_1
 epochs: 10
-lr_st: 0.01
-lr_r: 0.005
+lr_st: 0.001
+lr_r: 0.001
 batch_size: 1
-num_spatial: 2
+num_spatial: 1
 num_temporal: 1
-train_data: /home/dpietsch/Pictures/.cache/Inhouse1Processed
-validation_data: /home/dpietsch/Pictures/.cache/Inhouse2Processed
+train_data: /home/dpietsch/Pictures/.cache/Inhouse2Processed
+validation_data: /home/dpietsch/Pictures/.cache/Inhouse1Processed
 

@@ -19,14 +19,29 @@ def iterate_dataset():
     for gt, noise in tqdm_dataloader:
         tqdm_dataloader.set_description(f'Shape gt: {gt.shape} shape noise: {noise.shape}, Type: {type(gt)}')
 
-def view_stack(path: str):
-    img = np.load(path).astype(np.float32)
-    print(img.shape)
-    print(img.min(), img.max())
-    D = img.shape[1]
+def view_stack(clean: str, noisy: str):
+    img_clean = np.load(clean).astype(np.float32)
+    img_noisy = np.load(noisy).astype(np.float32)
+    print('Clean')
+    print(img_clean.shape)
+    print(img_clean.min(), img_clean.max())
+    print('Noise')
+    print(img_noisy.shape)
+    print(img_noisy.min(), img_noisy.max())
+    
+    D, H, W = img_clean.shape[1:]
     for i in range(D):
-        slice_img = (img[0, i, :, :] * 255).astype(np.uint8)
-        cv.imshow('patch', slice_img)
+        slice_img_clean = (img_clean[0, i, :, :] * 255).astype(np.uint8)
+        slice_img_noisy = (img_noisy[0, i, :, :] * 255).astype(np.uint8)
+        out_image = np.zeros(shape=[H, 3*W], dtype=np.uint8)
+        out_image[0:H, 0:W] = slice_img_clean
+        out_image[0:H, W:2*W] = slice_img_noisy
+        difference = slice_img_clean.astype(np.float32)-slice_img_noisy.astype(np.float32)
+        difference = (difference - difference.min()) / (difference.max() - difference.min())
+        difference = difference * 255.0
+        out_image[0:H, 2*W:3*W] = difference.astype(np.uint8)
+        
+        cv.imshow('patch', out_image)
         cv.waitKey(0)
 
     cv.destroyAllWindows()
@@ -108,6 +123,7 @@ def image_domain_noise():
 def test():
     print('=== Running Tests ===')
     #iterate_dataset()
-    view_stack(path='/home/dpietsch/Pictures/.cache/Inhouse1Processed/532_Lunge_amplitudebased/images/phase_00.npy')
+    view_stack(clean='/home/dpietsch/Pictures/.cache/Inhouse1Processed/022_4DCT_Lunge_amplitudebased_complete/images/phase_00.npy', noisy='/home/dpietsch/Pictures/.cache/Inhouse1Processed/022_4DCT_Lunge_amplitudebased_complete/noise/noisy_phase_00.npy')
+    #view_stack(clean='/home/dpietsch/Pictures/.cache/Inhouse2Processed/case_01/images/phase_00.npy', noisy='/home/dpietsch/Pictures/.cache/Inhouse2Processed/case_01/noise/noisy_phase_00.npy')
     #sinogram_domain_noise()
     #image_domain_noise()
