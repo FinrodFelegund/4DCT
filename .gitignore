@@ -7,6 +7,7 @@ logs/
 parameters/
 results/
 datainfo/
+Claude.md
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
