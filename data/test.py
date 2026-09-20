@@ -1,4 +1,4 @@
-from .dataset import CT4dDataset
+from .dataset import CTTrainDataset
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from utils import noise
@@ -10,11 +10,11 @@ DATASETPATHS = ['/home/dpietsch/Pictures/.cache/Inhouse1Processed']
 
 
 def iterate_dataset():
-    data = CT4dDataset.generate_dataframe(DATASETPATHS)
+    data = CTTrainDataset.generate_dataframe(DATASETPATHS)
     print(data.head())
 
-    ct4d_dataset = CT4dDataset(data, CT4dDataset.get_train_transforms())
-    tqdm_dataloader = tqdm(DataLoader(ct4d_dataset, batch_size=1, num_workers=0, collate_fn=CT4dDataset.collate_fn))
+    ct4d_dataset = CTTrainDataset(data, CTTrainDataset.get_train_transforms())
+    tqdm_dataloader = tqdm(DataLoader(ct4d_dataset, batch_size=1, num_workers=0, collate_fn=CTTrainDataset.collate_fn))
 
     for gt, noise in tqdm_dataloader:
         tqdm_dataloader.set_description(f'Shape gt: {gt.shape} shape noise: {noise.shape}, Type: {type(gt)}')
@@ -51,9 +51,9 @@ def sinogram_domain_noise():
 
     import matplotlib.pyplot as plt
 
-    data = CT4dDataset.generate_dataframe(DATASETPATHS)
-    ct4d_dataset = CT4dDataset(data, CT4dDataset.get_transforms())
-    dataloader = DataLoader(ct4d_dataset, batch_size=1, num_workers=0, collate_fn=CT4dDataset.collate_fn)
+    data = CTTrainDataset.generate_dataframe(DATASETPATHS)
+    ct4d_dataset = CTTrainDataset(data, CTTrainDataset.get_transforms())
+    dataloader = DataLoader(ct4d_dataset, batch_size=1, num_workers=0, collate_fn=CTTrainDataset.collate_fn)
 
     data = next(iter(dataloader))[:, :1]
 
@@ -85,9 +85,9 @@ def sinogram_domain_noise():
 def image_domain_noise():
     import matplotlib.pyplot as plt
 
-    data = CT4dDataset.generate_dataframe(DATASETPATHS)
-    ct4d_dataset = CT4dDataset(data, CT4dDataset.get_transforms())
-    dataloader = DataLoader(ct4d_dataset, batch_size=1, num_workers=0, collate_fn=CT4dDataset.collate_fn)
+    data = CTTrainDataset.generate_dataframe(DATASETPATHS)
+    ct4d_dataset = CTTrainDataset(data, CTTrainDataset.get_transforms())
+    dataloader = DataLoader(ct4d_dataset, batch_size=1, num_workers=0, collate_fn=CTTrainDataset.collate_fn)
 
     data = next(iter(dataloader))[:, :1]
 

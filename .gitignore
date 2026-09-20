@@ -3,6 +3,10 @@ wandb/
 uv.lock
 animations/*
 !animations/.gitkeep
+logs/
+parameters/
+results/
+datainfo/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

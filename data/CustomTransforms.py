@@ -89,7 +89,7 @@ class CacheDataSet(MapTransform):
 
 
 class CropBatchTrain(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, num_crops=4, patch_size = 32, min_std = 0.02):
+    def __init__(self, keys, allow_missing_keys = False, num_crops=4, patch_size = 32, min_std = 0.01):
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
         self.num_crops = num_crops
@@ -167,7 +167,7 @@ class CropBatchValidation(MapTransform):
     
 
 class GenerateNoiseScans(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, dosage: float = 0.25, pixel_size_mm: float = 1.16, device: str | torch.device = 'cuda:0', slice_size: int = 16):
+    def __init__(self, keys, allow_missing_keys = False, dosage: float = 0.25, pixel_size_mm: float = 1.16, device: str | torch.device = 'cuda:0', slice_size: int = 16, max_proj: float = 120.0):
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
         self.dosage = dosage
@@ -176,12 +176,14 @@ class GenerateNoiseScans(MapTransform):
         self.noise_model = None
         self._noise_model_size = None
         self.slice_size = slice_size
+        self.max_proj = max_proj
 
     def _get_noise_model(self, image_size: int):
         if self._noise_model_size != image_size:
             self.noise_model = None
             torch.cuda.empty_cache()
             self.noise_model = SinogramNoise(
+                max_proj=self.max_proj,
                 b_type='Fan-Beam',
                 image_size=image_size,
                 dosage=self.dosage,
@@ -195,6 +197,7 @@ class GenerateNoiseScans(MapTransform):
         
 
     def __call__(self, data: Dict):
+        max_list = []
         for key in self.keys:
             if key not in data:
                 if self.allow_missing_keys:
@@ -205,51 +208,54 @@ class GenerateNoiseScans(MapTransform):
             C, D, H, W = img.shape
             noise_model = self._get_noise_model(H)
 
-            with torch.no_grad():
-                slices = img.reshape(C*D, H, W)
-                noisy = torch.empty_like(slices)
-                for start in range(0, C * D, self.slice_size):
-                    end = min(start + self.slice_size, C * D)
-                    slab = slices[start:end].to(self.device)
-                    noisy[start:end] = noise_model(slab).cpu()
-                    del slab
             
-            data[f'noisy_{key}'] = noisy.reshape(C, D, H, W)
-            del slices, noisy
+            with torch.no_grad():
+                slices = img.reshape(C * D, H, W)
+                out_recon = torch.empty((C * D, H, W), dtype=torch.float32, device='cpu')
+                out_noisy = torch.empty((C * D, H, W), dtype=torch.float32, device='cpu')
 
-        torch.cuda.empty_cache()
+                for s in range(0, C * D, self.slice_size):
+                   
+                    slab = slices[s:s+self.slice_size].to(self.device)
+                    #max_list.append(noise_model.compute_max_proj(slab))
+                    out_recon[s:s+self.slice_size], out_noisy[s:s+self.slice_size] = noise_model(slab)
+                data[key] = out_recon.reshape(C, D, H, W)
+                data[f'noisy_{key}'] = out_noisy.reshape(C, D, H, W)
+                    
+        #max_tensor = torch.cat(max_list)
+        #data['max_proj'] = torch.max(max_tensor)
 
         return data
     
-class CustomForegroundCrop(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, threshold_hu: float = -800.0):
+class ForegroundBBox(MapTransform):
+
+    def __init__(self, keys, source_key='clean', thresh=0.056, margin=8, min_size=32):
         self.keys = keys
-        self.allow_missing_keys = allow_missing_keys
-        self.threshold_hu = threshold_hu
-
-    def __call__(self, data: Dict):
-        present = [k for k in self.keys if k in data]
-        if not present:
-            if self.allow_missing_keys:
-                return data
-            raise KeyError(f'None of {self.keys} found in data')
-
-
-        union = torch.stack([torch.as_tensor(data[k]) for k in present], dim=0)
-        union = union.max(dim=0).values
-        data['_fg_source'] = union
-     
-
-        cropper =  CropForegroundd(
-            keys=present,
-            source_key='_fg_source',
-            select_fn=lambda x: x > self.threshold_hu,
-            start_coord_key=None,
-            end_coord_key=None,
-        )
-        data = cropper(data)
-        del data['_fg_source']
-
+        self.source_key = source_key
+        self.thresh = thresh
+        self.margin = margin
+        self.min_size = min_size
+        
+    def __call__(self, data):
+        src = torch.as_tensor(data[self.source_key])       # (1,10,D,H,W)
+        vol = src.reshape(-1, *src.shape[-3:])             # (N,D,H,W)
+        fg  = (vol > self.thresh).any(dim=0)               # (D,H,W)
+        hw  = fg.any(dim=0)                                # (H,W)  keep full D
+        ys, xs = torch.where(hw.any(1))[0], torch.where(hw.any(0))[0]
+        if len(ys) == 0 or len(xs) == 0:
+            return data
+        H, W = fg.shape[-2:]
+        y0, y1 = max(int(ys[0])-self.margin, 0), min(int(ys[-1])+1+self.margin, H)
+        x0, x1 = max(int(xs[0])-self.margin, 0), min(int(xs[-1])+1+self.margin, W)
+        # never let the bbox fall below patch size
+        def pad(a, b, n, hi):
+            if b - a >= n: return a, b
+            c = (a + b) // 2; a = min(max(c - n//2, 0), hi - n); return a, a + n
+        y0, y1 = pad(y0, y1, self.min_size, H)
+        x0, x1 = pad(x0, x1, self.min_size, W)
+        for k in self.keys:
+            if k in data:
+                data[k] = data[k][..., y0:y1, x0:x1]
         return data
     
 class PadToSquare(MapTransform):
@@ -297,9 +303,8 @@ class MidSlice(MapTransform):
                 else:
                     raise KeyError(f'Key {key} missing from data')
             img = data[key]
-            mid_t = T // 2
             mid_d = D // 2
-            data[key] = img[:, mid_t:mid_t+1, mid_d:mid_d+1, :, :].unsqueeze(0)
+            data[key] = img[:, :, mid_d-2:mid_d+2, :, :].unsqueeze(0)
 
         return data
 

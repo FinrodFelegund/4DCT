@@ -3,7 +3,7 @@ name = "4dct"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = "==3.12.3"
+requires-python = "==3.12.13"
 dependencies = [
 	"torch",
 	"torchvision",
@@ -23,22 +23,45 @@ dependencies = [
 	"wandb",
 	"npy-reader>=1.1.2",
 	"plotly>=6.8.0",
+	"bilateralfilter4D-torch",
+	"bilateralfilter3D-torch",
+	"bilateralfilter4D-torch-spt",
+	"bilateralfilter4D-torch-centerweight",
+	"bilateralfilter4D-torch-learnable-spt",
+	"bilateralfilter4D-torch-lut"
 ]
 
 [tool.uv]
 	environments = [
 		"sys_platform == 'linux' and platform_machine == 'x86_64'"
 	]
+no-build-isolation-package = [
+	"bilateralfilter4d-torch",
+	"bilateralfilter3d-torch",
+	"bilateralfilter4D-torch-spt",
+	"bilateralfilter4D-torch-centerweight",
+	"bilateralfilter4D-torch-learnable-spt",
+	"bilateralfilter4D-torch-lut"
+]
 
 [tool.uv.sources]
-torch = { index = "pytorch" }
-torchvision = { index = "pytorch" }
-torchmetrics = { index = "pytorch" }
-torch-radon = { path = "../torch-radon/dist/torch_radon-3.0.0-cp312-cp312-linux_x86_64.whl"}
+torch = { index = "pytorch-cu124" }
+torchvision = { index = "pytorch-cu124" }
+torchmetrics = { index = "pytorch-cu124" }
+torch-radon = { path = "../torch-radon/dist/torch_radon-0.0.0-cp312-cp312-linux_x86_64.whl"}
+bilateralfilter4D-torch = { path = "models/BilateralFilter4D", editable = true }
+bilateralfilter3D-torch = { path = "models/BilateralFilter3D", editable = true }
+bilateralfilter4D-torch-spt = { path = "models/SpatioTemporalFilter", editable = true }
+bilateralfilter4D-torch-centerweight = { path = "models/WeightedCenterFilter4D", editable = true}
+bilateralfilter4D-torch-learnable-spt = { path = "models/LearnableSpatialFilter4D", editable = true }
+bilateralfilter4D-torch-lut = { path= "models/AllLearnable4D", editable = true }
 
 [[tool.uv.index]]
-name = "pytorch"
-url = "https://download.pytorch.org/whl/cu121"
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
 explicit = true
+
+[tool.setuptools]
+packages = ["data", "models", "utils"]
 
 

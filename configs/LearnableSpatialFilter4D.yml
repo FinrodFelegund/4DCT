@@ -1,0 +1,13 @@
+name: LearnableSpatialFilter4D
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+amp: false
+model:
+  stages:
+    - type: learnable_spt4d
+      count: 3
+      params: {sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5,
+               color_sigma: 0.01, window_size_t: 9, pad_t: 4, window_sizes: null}
+optim: {lr_kernel: 1.0e-3, lr_r: 0.005}
+clamp: {range_min: 0.0001}

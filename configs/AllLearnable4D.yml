@@ -1,0 +1,13 @@
+name: AllLearnable4D_LUT
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+amp: false
+reg_weight: 1.0e-3    # weight on lut_smoothness_penalty
+model:
+  stages:
+    - type: lut4d
+      count: 3
+      params: {sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5,
+               color_sigma: 0.01, lut_bins: 64}
+optim: {lr_kernel: 1.0e-3, lr_lut: 1.0e-3}

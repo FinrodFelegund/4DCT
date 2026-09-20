@@ -8,6 +8,7 @@ from tqdm import tqdm
 import plotly.express as px
 import pandas as pd
 import matplotlib.pyplot as plt
+from data.dataset import CacheDataSet
 
 DATASETPATH = r'/home/dpietsch/Pictures/Inhouse1'
 

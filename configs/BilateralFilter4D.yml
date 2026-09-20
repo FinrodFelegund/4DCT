@@ -1,0 +1,14 @@
+name: BilateralFilter4D
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+model:
+  stages:
+    - type: spatial3d
+      count: 3
+      params: {sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01}
+    - type: temporal4d
+      count: 1
+      params: {sigma_t: 0.5, color_sigma: 0.01, pad_t: 4}
+optim: {lr_st: 0.01, lr_r: 0.005}
+clamp: {sigma_min: 0.01, sigma_max: 2.0, range_min: 0.0001}
