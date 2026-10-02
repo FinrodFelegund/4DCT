@@ -23,6 +23,7 @@ dependencies = [
 	"wandb",
 	"npy-reader>=1.1.2",
 	"plotly>=6.8.0",
+	"scipy>=1.18.0",
 	"bilateralfilter4D-torch",
 	"bilateralfilter3D-torch",
 	"bilateralfilter4D-torch-spt",

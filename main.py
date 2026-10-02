@@ -29,6 +29,8 @@ def main():
         train(config)
     elif args.inference:
         pass
+    elif args.cache:
+        cacheDataSet()
     else:
         raise RuntimeError('No known argument provided')
 

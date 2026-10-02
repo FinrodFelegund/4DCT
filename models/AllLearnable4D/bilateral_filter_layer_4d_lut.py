@@ -86,9 +86,12 @@ class BilateralFilter4DLUT(torch.nn.Module):
     def __init__(self,
                  sigma_t, sigma_x, sigma_y, sigma_z, color_sigma,
                  lut_bins=32,
+                 lut_max=1.0,
                  window_sizes=None,
                  window_size_t=9,
                  symmetric_lut=True,
+                 kernel_floor=1e-6,
+                 pad_t=4,
                  use_gpu=True):
 
         super().__init__()
@@ -98,20 +101,36 @@ class BilateralFilter4DLUT(torch.nn.Module):
 
         for w in window_sizes:
             assert w % 2 == 1, "window size must be odd"
+        if not 0.0 < lut_max <= 1.0:
+            raise ValueError(f'lut_max must lie in (0, 1], got {lut_max}')
+
 
         self.window_sizes = tuple(int(w) for w in window_sizes)
         self.lut_bins = int(lut_bins)
+        self.lut_max = float(lut_max)
         self.symmetric_lut = bool(symmetric_lut)
 
-        self.kernel = torch.nn.Parameter(
-            gaussian_4d(sigma_t, sigma_x, sigma_y, sigma_z, self.window_sizes)
-        )
+        self.sigma_t = float(sigma_t)
+        self.sigma_x = float(sigma_x)
+        self.sigma_y = float(sigma_y)
+        self.sigma_z = float(sigma_z)
+        self.color_sigma = float(color_sigma)
 
-        lut0 = gaussian_lut_2d(color_sigma, self.lut_bins)
+
+        kernel =  gaussian_4d(self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, self.window_sizes)
+        kernel = kernel / kernel.max()
+
+        self.log_kernel = torch.nn.Parameter(torch.log(kernel + float(kernel_floor)))
+
+        lut0 = gaussian_lut_2d(self.color_sigma / self.lut_max, self.lut_bins)
         self.raw_lut = torch.nn.Parameter(inverse_softplus(lut0))
 
-        self.pad_t = self.window_sizes[0] // 2
+        self.pad_t = pad_t
         self.use_gpu = use_gpu
+
+    def kernel_weights(self):
+        k = torch.exp(self.log_kernel)
+        return k / k.sum()
 
     def activated_lut(self):
         lut = torch.nn.functional.softplus(self.raw_lut)
@@ -129,7 +148,7 @@ class BilateralFilter4DLUT(torch.nn.Module):
 
     def parameter_groups(self, lr_kernel=1e-3, lr_lut=1e-3):
         return [
-            {"params": [self.kernel], "lr": lr_kernel, "weight_decay": 0.0},
+            {"params": [self.log_kernel], "lr": lr_kernel, "weight_decay": 0.0},
             {"params": [self.raw_lut], "lr": lr_lut, "weight_decay": 0.0},
         ]
 
@@ -140,7 +159,7 @@ class BilateralFilter4DLUT(torch.nn.Module):
         x = input_tensor.permute(0, 1, 2, 4, 5, 3).contiguous()
         x = pad_circulat_t(x, self.pad_t)
 
-        kernel = self.kernel.to(dtype=x.dtype)
+        kernel = self.kernel_weights().to(dtype=x.dtype)
         lut = self.activated_lut().to(x.dtype)
 
         if self.use_gpu:
@@ -150,3 +169,9 @@ class BilateralFilter4DLUT(torch.nn.Module):
 
         output = unpad_circular_t(output, self.pad_t)
         return output.permute(0, 1, 2, 5, 3, 4).contiguous()
+
+    def __repr__(self):
+        return (f'LearnableFilterSPT4DLUT(sigma_t: {self.sigma_t} sigma_x: {self.sigma_x} '
+                f'sigma_y: {self.sigma_y} sigma_z: {self.sigma_z}) color_sigma (init): {self.color_sigma} '
+                f'lut: {self.lut_bins} bins up to {self.lut_max * 4024.0 - 1024.0:.0f} HU '
+                f'kernel shape: {tuple(self.log_kernel.shape)}')

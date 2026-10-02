@@ -3,15 +3,16 @@
 set -u
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo ${ROOT}
+PYTHON="$ROOT/.venv/bin/python"
 PYTHON="${PYTHON:-python}"
+echo ${PYTHON}
 failed=()
+GPU=2
 
-#BilateralFilter3D BilateralFilter4D SpatioTemporalFilter WeightedCenterFilter4D LearnableSpatialFilter4D
-
-for pkg in AllLearnable4D; do
+for pkg in LearnableSpatialFilter4D BilateralFilter3D BilateralFilter4D SpatioTemporalFilter WeightedCenterFilter4D LearnableFilter4D LearnableSpatialFilter4D AllLearnable4D; do
     echo
     echo "######## $pkg ########"
-    if ! (cd "$ROOT/models/$pkg" && $PYTHON gradcheck.py); then
+    if ! (cd "$ROOT/models/$pkg" && CUDA_VISIBLE_DEVICES="$GPU" $PYTHON gradcheck.py); then
         failed+=("$pkg")
     fi 
 done

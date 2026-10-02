@@ -123,7 +123,7 @@ def image_domain_noise():
 def test():
     print('=== Running Tests ===')
     #iterate_dataset()
-    view_stack(clean='/home/dpietsch/Pictures/.cache/Inhouse1Processed/022_4DCT_Lunge_amplitudebased_complete/images/phase_00.npy', noisy='/home/dpietsch/Pictures/.cache/Inhouse1Processed/022_4DCT_Lunge_amplitudebased_complete/noise/noisy_phase_00.npy')
+    view_stack(clean='/home/dpietsch/Pictures/.cache/Inhouse1Processed/022_4DCT_Lunge_amplitudebased_complete/images/phase_00.npy', noisy='/home/dpietsch/Pictures/.cache/Inhouse1Processed/022_4DCT_Lunge_amplitudebased_complete/noise/noise_phase_00.npy')
     #view_stack(clean='/home/dpietsch/Pictures/.cache/Inhouse2Processed/case_01/images/phase_00.npy', noisy='/home/dpietsch/Pictures/.cache/Inhouse2Processed/case_01/noise/noisy_phase_00.npy')
     #sinogram_domain_noise()
     #image_domain_noise()

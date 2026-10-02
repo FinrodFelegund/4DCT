@@ -30,10 +30,6 @@ __global__ void BilaterFilterCudaKernelLearnableSptBackward(
 
     int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
     int batchOffset = blockIdx.y * cBatchStrideBack;
-
-    if(homeOffset >= cColorStrideBack){
-      return;
-    }
     const bool active = homeOffset < cColorStrideBack;
 
     int kernelSize = 1;
@@ -148,20 +144,18 @@ __global__ void BilaterFilterCudaKernelLearnableSptBackward(
       }
     }
     __syncthreads();
-
-    if(active){
-
-      for(int i = threadIdx.x; i < kernelSize; i+= blockDim.x){
-        scalar_t v = sGradKernel[i];
-        if(v != (scalar_t)0){
-          atomicAdd(&gradKernelTensor[i], v);
-        }
+    for(int i = threadIdx.x; i < kernelSize; i+= blockDim.x){
+      scalar_t v = sGradKernel[i];
+      if(v != (scalar_t)0){
+        atomicAdd(&gradKernelTensor[i], v);
       }
-#pragma unroll
-    for(int c = 0; c < C; c++){
-      gradientOutputTensor[batchOffset + homeOffset + c * cColorStrideBack] = valueSum;
     }
-  }
+    if(active){
+#pragma unroll
+      for(int c = 0; c < C; c++){
+        gradientOutputTensor[batchOffset + homeOffset + c * cColorStrideBack] = valueSum;
+      }
+    }
 }
 
 

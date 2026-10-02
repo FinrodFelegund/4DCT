@@ -1,0 +1,1 @@
+/home/dpietsch/4DCT/parameters/LearnableFilter4DLUT_epoch29_loss0.000048.pth

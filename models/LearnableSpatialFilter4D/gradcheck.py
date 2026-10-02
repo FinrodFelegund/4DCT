@@ -58,3 +58,31 @@ gradient_kernel(layer_bf_gpu)
 
 print('Gradient with respect to sigma_range:')
 gradient_r(layer_bf_gpu)
+
+WINDOW = (5, 3, 1, 3)                     # every axis different, including size 1
+SHAPE = (1, 1, 7, 6, 5, 8)                # [B, C, T, X, Y, Z], all sizes different
+
+
+def reference(x, k, s):
+    x = x[0, 0]
+    halves = [n // 2 for n in k.shape]
+    num, den = torch.zeros_like(x), torch.zeros_like(x)
+    for idx in torch.cartesian_prod(*[torch.arange(n) for n in k.shape]).tolist():
+        delta = [i - h for i, h in zip(idx, halves)]
+        src = tuple(slice(max(0, d), n + min(0, d)) for d, n in zip(delta, x.shape))
+        dst = tuple(slice(max(0, -d), n - max(0, d)) for d, n in zip(delta, x.shape))
+        nb, home = x[src], x[dst]
+        w = k[tuple(idx)] * torch.exp(-(nb - home) ** 2 / (2 * s ** 2))
+        num[dst] += w * nb
+        den[dst] += w
+    return (num / den)[None, None]
+
+
+torch.manual_seed(0)
+x = torch.rand(SHAPE, dtype=torch.double, device='cuda')
+k = torch.rand(WINDOW, dtype=torch.double, device='cuda') + 0.1
+s = torch.tensor(0.3, dtype=torch.double, device='cuda')
+
+print('forward max |cuda - reference|:', (BilateralFilterFunction4dlearnablesptGPU.apply(x, k, s) - reference(x, k, s)).abs().max().item())
+print('gradcheck input :', gradcheck(BilateralFilterFunction4dlearnablesptGPU.apply, (x.clone().requires_grad_(), k, s), eps=1e-6, atol=1e-5, nondet_tol=1e-6))
+print('gradcheck kernel:', gradcheck(BilateralFilterFunction4dlearnablesptGPU.apply, (x, k.clone().requires_grad_(), s), eps=1e-6, atol=1e-5, nondet_tol=1e-6))

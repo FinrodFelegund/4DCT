@@ -5,7 +5,8 @@ animations/*
 !animations/.gitkeep
 logs/
 parameters/
-results/
+*.npy
+*.nii
 datainfo/
 Claude.md
 

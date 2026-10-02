@@ -143,14 +143,15 @@ __global__ void BilaterFilterCudaKernelLearnableSptForward(
   }
 
   const scalar_t centerK = kernelTensor[centerKernelOffset];
+  const scalar_t safeWeightSum = (weightSum == (scalar_t)0) ? (scalar_t)1e-12 : weightSum;
 
 #pragma unroll
   for(int c = 0; c < C; c++){
-    output[batchOffset + homeOffset + c * cColorStride] = valueSum / weightSum;
-    outputWeightsTensor[batchOffset + homeOffset + c * cColorStride] = weightSum;
+    output[batchOffset + homeOffset + c * cColorStride] = valueSum / safeWeightSum;
+    outputWeightsTensor[batchOffset + homeOffset + c * cColorStride] = safeWeightSum;
 
-    d0_dx_ki[batchOffset + homeOffset + c * cColorStride] = -(1 / weightSum) * (valueSum / weightSum) * dw_dx_ki + (1 / weightSum) * (dfilter_dx_ki + centerK);
-    d0_dsig_r[batchOffset + homeOffset + c * cColorStride] = -(1 / weightSum) * (valueSum / weightSum) * colorSum_w + (1 / weightSum) * colorSum_alpha;
+    d0_dx_ki[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * dw_dx_ki + (1 / safeWeightSum) * (dfilter_dx_ki + centerK);
+    d0_dsig_r[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * colorSum_w + (1 / safeWeightSum) * colorSum_alpha;
   }
 }
 

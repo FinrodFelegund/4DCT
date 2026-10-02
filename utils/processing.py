@@ -8,7 +8,7 @@ from tqdm import tqdm
 import plotly.express as px
 import pandas as pd
 import matplotlib.pyplot as plt
-from data.dataset import CacheDataSet
+#from data.dataset import 
 
 DATASETPATH = r'/home/dpietsch/Pictures/Inhouse1'
 
@@ -89,3 +89,20 @@ def make_sigma_plot(sigma_dict, title):
     )
 
     return fig
+
+BODY_THRESH = 0.018 #should be about -950HU excludes outside air
+def body_box(volume, pad=0, thresh=BODY_THRESH):
+    fg = (volume > thresh).reshape(-1, *volume.shape[-2:]).any(axis=0)
+    H, W = fg.shape
+    ys, xs = np.where(fg.any(axis=1))[0], np.where(fg.any(axis=0))[0]
+    if ys.size == 0:
+        return 0, H, 0, W
+    
+    return (max(int(ys[0]) - pad, 0), min(int(ys[-1]) + 1 + pad, H),
+            max(int(xs[0]) - pad, 0), min(int(xs[-1]) + 1 + pad, W))
+
+def interior(x: torch.Tensor, margin: int):
+    return x if margin <= 0 else x[..., margin:-margin, margin:-margin, margin:-margin]
+
+def inplane_interior(x: torch.Tensor, margin: int):
+    return x if margin <= 0 else x[..., margin:-margin, margin:-margin]

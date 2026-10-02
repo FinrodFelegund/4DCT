@@ -96,10 +96,10 @@ class BilateralFilter4dlearnablespt(nn.Module):
                  window_sizes=None,
                  window_size_t=9,
                  pad_t=4,
+                 kernel_floor=1e-6,
                  use_gpu=True):
 
         super().__init__()
-
         self.use_gpu = use_gpu
 
         if window_sizes == None:
@@ -111,15 +111,25 @@ class BilateralFilter4dlearnablespt(nn.Module):
         self.window_sizes = tuple(int(w) for w in window_sizes)
 
         kernel = gaussian_4d(sigma_t, sigma_x, sigma_y, sigma_z, self.window_sizes)
-        self.kernel = nn.Parameter(kernel)
+        kernel = kernel / kernel.max()
+        self.log_kernel = nn.Parameter(torch.log(kernel + float(kernel_floor)))
 
         self.color_sigma = nn.Parameter(torch.tensor(float(color_sigma)), requires_grad=True)
-        self.pad_t = self.window_sizes[0] // 2
+        self.pad_t = pad_t
 
-    def parameter_groups(self, lr_kernel=1e-3, lr_sigma=1e-3):
+        self.sigma_t = sigma_t
+        self.sigma_x = sigma_x
+        self.sigma_y = sigma_y
+        self.sigma_z = sigma_z
+
+    def kernel_weights(self):
+        k = torch.exp(self.log_kernel)
+        return k / k.sum()
+
+    def parameter_groups(self, lr_kernel=1e-2, lr_sigma=1e-3):
         groups = [
             {
-                'params': [self.kernel],
+                'params': [self.log_kernel],
                 'lr': lr_kernel,
                 'weight_decay': 0.0,
             }, 
@@ -141,7 +151,7 @@ class BilateralFilter4dlearnablespt(nn.Module):
         # Choose between CPU processing and CUDA acceleration.
         input_tensor = input_tensor.permute(0, 1, 2, 4, 5, 3).contiguous()
         input_tensor = pad_circular_t(input_tensor, self.pad_t)
-        kernel = self.kernel.to(dtype=input_tensor.dtype)
+        kernel = self.kernel_weights().to(dtype=input_tensor.dtype)
         color_sigma = self.color_sigma.to(dtype=input_tensor.dtype)
 
         if self.use_gpu:
@@ -155,3 +165,6 @@ class BilateralFilter4dlearnablespt(nn.Module):
 
         output = output.permute(0, 1, 2, 5, 3, 4).contiguous()
         return output
+
+    def __repr__(self):
+        return f'BilaterFilter4D(sigma_t: {self.sigma_t} sigma_x: {self.sigma_x} sigma_y: {self.sigma_y} sigma_z: {self.sigma_z}) color_sigma: {self.color_sigma.item()} kernel shape: {self.log_kernel.shape}'

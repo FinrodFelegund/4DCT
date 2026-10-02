@@ -1,0 +1,22 @@
+name: LearnableFilterSPT4DLUT
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+amp: false
+reg_weight: 0.001
+model:
+  stages:
+    - type: lut4d
+      count: 3
+      params: [
+        {sigma_t: 0.5869, sigma_x: 0.5834, sigma_y: 0.2163, sigma_z: 0.6498,
+                 window_size_t: 9, pad_t: 4, window_sizes: null, kernel_floor: 1e-6,
+                 color_sigma: 0.4794, lut_bins: 96, lut_max: 0.503, symmetric_lut: True},
+        {sigma_t: 0.6404, sigma_x: 0.2173, sigma_y: 0.2432, sigma_z: 0.2426,
+                 window_size_t: 9, pad_t: 4, window_sizes: null, kernel_floor: 1e-6,
+                 color_sigma: 0.3195,  lut_bins: 96, lut_max: 0.503, symmetric_lut: True},
+        {sigma_t: 0.2495, sigma_x: 0.2104, sigma_y: 0.7592, sigma_z: 0.2127,
+                 window_size_t: 9, pad_t: 4, window_sizes: null, kernel_floor: 1e-6,
+                 color_sigma: 0.3521, lut_bins: 96, lut_max: 0.503, symmetric_lut: True}
+      ]
+optim: {lr_kernel: 0.01, lr_lut: 0.001}

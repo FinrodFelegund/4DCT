@@ -1,0 +1,19 @@
+name: LearnableFilterSPT4D
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+amp: false
+model:
+  stages:
+    - type: learnable_spt4d
+      count: 3
+      params: [
+        {sigma_t: 0.5869, sigma_x: 0.5834, sigma_y: 0.2163, sigma_z: 0.6498,
+                 color_sigma: 0.4794, window_size_t: 9, pad_t: 4, window_sizes: null, kernel_floor: 1e-6},
+        {sigma_t: 0.6404, sigma_x: 0.2173, sigma_y: 0.2432, sigma_z: 0.2426,
+                 color_sigma: 0.3195, window_size_t: 9, pad_t: 4, window_sizes: null, kernel_floor: 1e-6},
+        {sigma_t: 0.2495, sigma_x: 0.2104, sigma_y: 0.7592, sigma_z: 0.2127,
+                 color_sigma: 0.3521, window_size_t: 9, pad_t: 4, window_sizes: null, kernel_floor: 1e-6}
+      ]
+optim: {lr_kernel: 0.01, lr_r: 0.005}
+clamp: {range_min: 0.0001}

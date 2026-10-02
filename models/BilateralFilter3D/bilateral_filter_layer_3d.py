@@ -121,3 +121,6 @@ class BilateralFilter3d(torch.nn.Module):
 
         output = output.view(B, C, T, X, Y, Z).permute(dims=(0, 1, 2, 5, 3, 4)).contiguous()
         return output
+
+    def __repr__(self):
+        return f'BilaterFilter3D(sigma_x: {self.sigma_x.item()} sigma_y: {self.sigma_y.item()} sigma_z: {self.sigma_z.item()} sigma_r: {self.color_sigma.item()})'

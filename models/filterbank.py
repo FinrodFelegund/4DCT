@@ -42,10 +42,11 @@ class FilterBank(torch.nn.Module):
             if stage_type not in STAGE_BUILDERS:
                 raise KeyError(f'Unknown stage type {stage_type!r}. '
                                f'Known: {sorted(STAGE_BUILDERS)}')
-            params = dict(spec.get('params', {}))
+            params = spec.get('params', {})
             for i in range(int(spec.get('count', 1))):
-                built.append(STAGE_BUILDERS[stage_type](**params))
+                built.append(STAGE_BUILDERS[stage_type](**params[i]))
                 names.append(f'{stage_type}_{i + 1}')
+
 
         if not built:
             raise ValueError('Config declares no stages.')
@@ -69,7 +70,7 @@ class FilterBank(torch.nn.Module):
     def regularisation(self):
         total = None
         for stage in self.stages:
-            penalty_fn = getattr(stage, 'lut_smoothness_penalty', 'None')
+            penalty_fn = getattr(stage, 'lut_smoothness_penalty', None)
             if penalty_fn is None:
                 continue
             
@@ -79,6 +80,8 @@ class FilterBank(torch.nn.Module):
         return total
 
     def __repr__(self):
+        for stage in self.stages:
+            print(stage)
         return f'Filterbank({", ".join(self.stage_names)})'
 
 

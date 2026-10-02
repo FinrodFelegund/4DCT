@@ -1,0 +1,24 @@
+name: LearnableFilter4DLUT
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+amp: false
+reg_weight: 0.001    # weight on lut_smoothness_penalty
+model:
+  stages:
+    - type: spatial3d
+      count: 3
+      params: [
+        {sigma_x: 0.5409, sigma_y: 0.2238, sigma_z: 0.6343, color_sigma: 0.4946},
+        {sigma_x: 0.2215, sigma_y: 0.6062, sigma_z: 0.2353, color_sigma: 0.4806},
+        {sigma_x: 0.2136, sigma_y: 0.5737, sigma_z: 0.2205, color_sigma: 0.3763}
+      ]
+    - type: lut4d
+      count: 1
+      params: [
+        {sigma_t: 1.2637, sigma_x: 1.0, sigma_y: 1.0, sigma_z: 1.0,
+          color_sigma: 0.0539, pad_t: 4, window_sizes: [9, 1, 1, 1],
+          kernel_floor: 1e-6, lut_bins: 96, lut_max: 0.503, symmetric_lut: True}
+      ]
+optim: {lr_kernel: 0.01, lr_lut: 0.001, lr_st: 0.01, lr_r: 0.005}
+clamp: {sigma_min: 0.01, sigma_max: 2.0, range_min: 0.0001}

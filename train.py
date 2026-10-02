@@ -11,8 +11,16 @@ from tqdm import tqdm
 
 from data.dataset import CTTrainDataset, CTValidationDataset
 from models.filterbank import FilterBank
+from utils.processing import interior
+from utils.explore_sigmas import sweep_sigmas
 
 warnings.filterwarnings('ignore', category=DeprecationWarning)
+
+LUNG_LO, LUNG_HI = -1250.0, 250.0
+SOFT_LO, SOFT_HI = -160.0, 240.0
+def to_display(x, lo, hi):
+    hu = x * 4024.0 - 1024.0
+    return ((hu - lo) / (hi - lo)).clamp(0.0, 1.0) 
 
 RANGE_SUFFIXES = ('color_sigma', 'sigma_r')
 LUT_SUFFIXES = ('raw_lut', 'lut')
@@ -62,13 +70,22 @@ def clamp_parameters(model: torch.nn.Module, config: Dict):
     range_max = clamp_cfg.get('range_max', 2.0)
     center_min = clamp_cfg.get('center_min', 0.0)
     center_max = clamp_cfg.get('center_max', 10.0)
+    kernel_min = clamp_cfg.get('kernel_min', 0.0)
 
     for name, param in model.named_parameters():
+        if name.rsplit('.', 1)[-1].startswith('log_'):
+            continue
         group = group_of(name)
         if group == 'range':
             param.clamp_(min=range_min, max=range_max)
         elif group == 'spatiotemporal':
             param.clamp_(min=sigma_min, max=sigma_max)
+        elif group == 'center':
+            param.clamp_(min=center_min, max=center_max)
+        elif group == 'kernel':
+            param.clamp_(min=kernel_min)
+        elif group == 'skip':
+            continue
 
 def preview_grid(model, validation_dataset, device):
     """Centre slice of ground truth, prediction and input, side by side."""
@@ -80,40 +97,44 @@ def preview_grid(model, validation_dataset, device):
     d = pred.shape[3] // 2
 
     panel = torch.cat([clean[:, :, t, d], pred[:, :, t, d], noisy[:, :, t, d]], dim=0)
-    return make_grid(panel, nrow=3, normalize=False)
+    grid_lung = make_grid(to_display(panel, lo=LUNG_LO, hi=LUNG_HI), nrow=3, normalize=False, pad_value=1.0)
+    grid_soft = make_grid(to_display(panel, lo=SOFT_LO, hi=SOFT_HI), nrow=3, normalize=False, pad_value=1.0)
+    return (grid_lung * 255).round().to(torch.uint8).cpu(), (grid_soft * 255).round().to(torch.uint8).cpu()
 
-def validate(model, dataloader, dataset, criterion, psnr_metric, ssim_metric, device, amp_dtype, epoch, epochs, patch_batch_size):
+def validate(model, dataloader, dataset, criterion, psnr_metric, ssim_metric, device, amp_dtype, epoch, epochs, margin):
     model.eval()
     psnr_metric.reset()
     ssim_metric.reset()
-    val_loss, n_batches, grid = 0.0, 0, None
+    val_loss, n_batches, grid_lung, grid_soft = 0.0, 0, None, None
     pbar = tqdm(dataloader, desc=f'Epoch {epoch + 1}/{epochs} [VALIDATION]')
 
     with torch.no_grad():
         for i, (clean, noisy) in enumerate(pbar):
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                for idx in range(0, clean.shape[0], patch_batch_size):
-                    batch_clean = clean[idx:idx + patch_batch_size].to(device)
-                    batch_noisy = noisy[idx:idx + patch_batch_size].to(device)
-                    prediction = model(batch_noisy)
+                    clean = interior(clean.to(device), margin)
+                    noisy = noisy.to(device)
+                    prediction = interior(model(noisy), margin)
 
-                    val_loss += criterion(prediction, batch_clean).item()
+                    val_loss += criterion(prediction, clean).item()
                     n_batches += 1
-                    psnr_metric.update(prediction, batch_clean)
+                    psnr_metric.update(prediction, clean)
 
                     B, C, T, D, H, W = prediction.shape
                     ssim_metric.update(prediction.reshape(B * T * D, C, H, W),
-                                       batch_clean.reshape(B * T * D, C, H, W))
+                                       clean.reshape(B * T * D, C, H, W))
                     pbar.set_postfix(Image=i + 1, Patches=clean.shape[0])
 
-            if grid is None:
-                grid = preview_grid(model, dataset, device)
+            if grid_lung is None and grid_soft is None:
+                grid_lung, grid_soft = preview_grid(model, dataset, device)
 
     model.train()
-    return val_loss / max(n_batches, 1), psnr_metric.compute().item(), ssim_metric.compute().item(), grid
+    return (val_loss / max(n_batches, 1),
+            psnr_metric.compute().item(),
+            ssim_metric.compute().item(),
+            grid_lung, grid_soft)
 
 def resolve_amp(config: Dict):
-    amp_cfg = config.get('amp', True)
+    amp_cfg = config.get('amp', False)
     if amp_cfg is False:
         return None
     
@@ -125,29 +146,40 @@ def resolve_amp(config: Dict):
     return {'float16': torch.float16, 'bfloat16': torch.bfloat16}[
         config.get('amp_dtype', 'float16')]
 
+def build(model, path, DEVICE):
+    params = torch.load(path, map_location=DEVICE)
+    model.load_state_dict(params)
+    return model
+
 def train(config: Dict):
     wandb.init(entity=config.get('wandb_entity', 'ipmi'),
                project=config.get('wandb_project', '4DCT-Denoising'),
                name=config['name'], config=config)
-
+    
     device = torch.device('cuda')
     model = FilterBank(config['model']['stages']).to(device)
     print(model)
 
     dataframe = CTTrainDataset.generate_dataframe(config['train_data'])
+    dataframe = dataframe.sample(frac=1.0, random_state=config.get('split_seed', 0))
     n_train = int(config.get('num_train_scans', 30))
+
     train_dataset = CTTrainDataset(dataframe=dataframe.iloc[:n_train],
                                    transforms=CTTrainDataset.get_train_transforms())
+    
     validation_dataset = CTValidationDataset(dataframe=dataframe[n_train:],
                                              transforms=CTValidationDataset.get_validation_transforms(),
                                              scan_transforms=CTValidationDataset.get_scan_transforms())
+    wandb.config.update({'validation_scans': list(dataframe.index[n_train:])})
 
     batch_size = config.get('batch_size', 1)
+    margin = 8
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                                   num_workers=config.get('num_workers', 4),
                                   collate_fn=CTTrainDataset.collate_fn)
     validation_dataloader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
                                        num_workers=1, collate_fn=CTValidationDataset.collate_fn)
+
 
     optimizer = build_optimizer(model, config)
     amp_dtype = resolve_amp(config)
@@ -159,7 +191,6 @@ def train(config: Dict):
     reg_weight = config.get('reg_weight', 0.0)
     clip_norm = config.get('clip_grad_norm', 1.0)
     validate_every = config.get('validate_every', 2)
-    patch_batch_size = config.get('patch_batch_size', 4)
     epochs = config.get('epochs', 10)
     parameter_dir = config['parameter_dir']
     os.makedirs(parameter_dir, exist_ok=True)
@@ -168,6 +199,7 @@ def train(config: Dict):
     model.train()
 
     for epoch in range(epochs):
+
         pbar = tqdm(train_dataloader, desc=f'Epoch {epoch + 1}/{epochs} [TRAINING]')
         epoch_loss = 0.0
 
@@ -177,7 +209,7 @@ def train(config: Dict):
 
             with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
                 prediction = model(noisy)
-                loss = criterion(prediction, clean)
+                loss = criterion(interior(prediction, margin), interior(clean, margin))
                 if reg_weight:
                     penalty = model.regularisation()
                     if penalty is not None:
@@ -197,30 +229,34 @@ def train(config: Dict):
             pbar.set_postfix(Loss=f'{loss.item():.6f}')
             epoch_loss += loss.item()
 
-        wandb.log({'Train/Mean-Loss-Epoch': epoch / len(train_dataloader),
+        wandb.log({'Train/Mean-Loss-Epoch': epoch_loss / len(train_dataloader),
                    'Train/Epoch': epoch + 1})
-
+    
         if epoch % validate_every:
             continue
 
-        val_loss, val_psnr, val_ssim, grid = validate(
+        val_loss, val_psnr, val_ssim, grid_lung, grid_soft = validate(
             model, validation_dataloader, validation_dataset, criterion,
-            psnr_metric, ssim_metric, device, amp_dtype, epoch, epochs, patch_batch_size
+            psnr_metric, ssim_metric, device, amp_dtype, epoch, epochs, margin
         )
 
         wandb.log({'Validation/Loss': val_loss, 'Validation/psnr': val_psnr,
                    'Validation/ssim': val_ssim, 'Validation/Epoch': epoch + 1,
-                   'Validation/Images': wandb.Image(grid, caption=f'Epoch {epoch + 1}')})
-
+                   'Validation/Lung': wandb.Image(grid_lung, caption=f'Epoch {epoch + 1} | Lung Window'),
+                   'Validation/SoftTissue': wandb.Image(grid_soft, caption=f'Epoch {epoch + 1} | Soft Tissue Window')})
+        
         print(f'\nEpoch {epoch + 1}: val loss {val_loss:.6f} | '
               f'PSNR {val_psnr:.6f} | SSIM {val_ssim:.6f}')
 
         if val_loss < best_loss:
             best_loss = val_loss
             new_checkpoint = os.path.join(
-                parameter_dir, f'{config.get('name')}_loss{val_loss:.6f}.pth'
+                parameter_dir, f'{config.get('name')}_epoch{epoch + 1}_loss{val_loss:.6f}.pth'
             )
-            torch.save(model.state_dict(), new_checkpoint)
+            torch.save({
+                'model': model.state_dict(), 'config': config,
+                'epoch': epoch, 'val_loss': val_loss,
+            }, new_checkpoint)
             if best_checkpoint and os.path.exists(best_checkpoint):
                 os.remove(best_checkpoint)
             best_checkpoint = new_checkpoint

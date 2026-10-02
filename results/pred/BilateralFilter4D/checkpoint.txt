@@ -1,0 +1,1 @@
+/home/dpietsch/4DCT/parameters/BilateralFilter4D_epoch59_loss0.000055.pth

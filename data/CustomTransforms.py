@@ -1,11 +1,11 @@
-from monai.transforms import MapTransform, CropForegroundd
+from monai.transforms import MapTransform
 from typing import Dict
 import numpy as np
 from pathlib import Path
 import torch
 from utils.noise import SinogramNoise
-
-
+import zlib
+import json
     
 class OrderChannels(MapTransform):
     def __init__(self, keys, allow_missing_keys = False):
@@ -53,23 +53,20 @@ class EnsureBatchDimension(MapTransform):
                     data[key] = img
 
         return data
+
     
-class CacheDataSet(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, destination = None):
-        if not destination:
-            raise ValueError(f'Expected destination path but got {destination}')
+class CacheBatch(MapTransform):
+    def __init__(self, keys, allow_missing_keys = False):
         
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
-        self.destination = destination
 
     def __call__(self, data: Dict):
-        path = Path(self.destination)
-        scan = Path(data['scan'])
-        clean = Path(path / scan / 'images')
+        dest_path = Path(data['destination'])
+        clean = dest_path / 'images'
         clean.mkdir(parents=True, exist_ok=True)
-        noisy = Path(path / scan / 'noise')
-        noisy.mkdir(parents=True, exist_ok=True)
+        noise = dest_path /  'noise'
+        noise.mkdir(parents=True, exist_ok=True)
 
     
         for key in self.keys:
@@ -77,41 +74,62 @@ class CacheDataSet(MapTransform):
                 if self.allow_missing_keys:
                     continue
                 raise KeyError(f'Key {key} missing from data')
-            target_dir = noisy if key.startswith('noisy_') else clean
+            target_dir = noise if key.startswith('noise_') else clean
             file_path = target_dir / f'{key}.npy'
 
-            img = torch.as_tensor(data[key]).detach().cpu().numpy().astype(np.float16)
-            data[key] = img
+            img = torch.as_tensor(data[key]).detach().cpu().numpy().astype(np.float32)
+            data[key] = img.shape
             np.save(file_path, img)
-                
+
+        (dest_path / 'simulation.json').write_text(json.dumps(
+            {'scan': str(data['scan']), 'i0_full': data.get('i0_full')},
+            indent=2
+        ))
+    
         return data
 
 
 
 class CropBatchTrain(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, num_crops=4, patch_size = 32, min_std = 0.01):
+    def __init__(self, keys,
+                 allow_missing_keys = False,
+                 num_crops=8,
+                 patch_size=(32, 64, 64),
+                 margin=8,
+                 body_thresh=0.018,
+                 min_body_fraction=0.5,
+                 attempts=20):
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
         self.num_crops = num_crops
         self.patch_size = patch_size
-        self.min_std = min_std
+        self.margin = margin
+        self.body_thresh = body_thresh
+        self.min_body_fraction = min_body_fraction
+        self.attempts = attempts
 
     def __call__(self, data: Dict):
+        pd, ph, pw = self.patch_size
+        size_d, md = pd + 2 * self.margin, self.margin
+        size_h, mh = ph + 2 * self.margin, self.margin
+        size_w, mw = pw + 2 * self.margin, self.margin
         _, _, D, H, W = data['clean'].shape
-        img_clean = data['clean']
-        img_noise = data['noise']
+        if D < size_d or H < size_h or W < size_w:
+            raise ValueError(f'volume {D}x{H}x{W} smaller than crop {self.patch_size}')
+        
         stack_clean, stack_noise = [], []
         for _ in range(self.num_crops):
-            for attempt in range(10):
-                x = np.random.randint(0, W - self.patch_size + 1)
-                y = np.random.randint(0, H - self.patch_size + 1)
-                d = np.random.randint(0, D - self.patch_size + 1)
-                patch = img_clean[:, :, d:d+self.patch_size, y:y+self.patch_size, x:x+self.patch_size]
-                if patch.std() > self.min_std:
+            for _ in range(self.attempts):
+                d = np.random.randint(0, D - size_d + 1)
+                y = np.random.randint(0, H - size_h + 1)
+                x = np.random.randint(0, W - size_w + 1)
+                crop = data['clean'][:, :, d:d + size_d, y:y + size_h, x:x + size_w]
+                core = crop[..., md:size_d - md, mh:size_h - mh, mw:size_w - mw]
+                if (core > self.body_thresh).float().mean() >= self.min_body_fraction:
                     break
             
-            stack_clean.append(patch)
-            stack_noise.append(img_noise[:, :, d:d+self.patch_size, y:y+self.patch_size, x:x+self.patch_size])
+            stack_clean.append(crop)
+            stack_noise.append(data['noise'][:, :, d:d + size_d, y:y + size_h, x:x + size_w])
 
         data['clean'] = torch.stack(stack_clean, dim=0)
         data['noise'] = torch.stack(stack_noise, dim=0)
@@ -119,112 +137,127 @@ class CropBatchTrain(MapTransform):
         return data
 
 class CropBatchValidation(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, num_crops_per_dim=8, patch_size=32):
+    def __init__(self, keys,
+                 allow_missing_keys=False,
+                 source_key='clean',
+                 num_crops_per_dim=4,
+                 patch_size=(32, 64, 64),
+                 margin=8,
+                 body_thresh=0.018,
+                 min_body_fraction=0.5):
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
+        self.source_key = source_key
         self.num_crops_per_dim = num_crops_per_dim
         self.patch_size = patch_size
+        self.margin = margin
+        self.body_thresh = body_thresh
+        self.min_body_fraction = min_body_fraction
 
-    def _centered_offsets(self, dim_size: int) -> list:
-        n = min(self.num_crops_per_dim, dim_size // self.patch_size)
-        n = max(1, n)
-        extent = n * self.patch_size
-        start = max((dim_size - extent) // 2, 0)
-        offsets = [
-            min(start + i * self.patch_size, dim_size - self.patch_size)
-            for i in range(n)
-        ]
-
-        return offsets
-
+    def _core_stats(self, dim_size, ps):
+        usable = dim_size - 2 * self.margin
+        n = max(1, min(self.num_crops_per_dim, usable // ps))
+        first = self.margin + (usable - n * ps) // 2
+        return [first + i * ps for i in range(n)]
 
     def __call__(self, data: Dict):
-        ref_key = next(k for k in self.keys if k in data)
-        _, _, D, H ,W = data[ref_key].shape
+        (pd, ph, pw), m = self.patch_size, self.margin
+        ref = data[self.source_key]
+        _, _, D, H, W = ref.shape
+        if D < pd + 2 * m or H < ph + 2 * m or W < pw + 2 * m:
+            raise ValueError(f'volume {D}x{H}x{W} smaller than crop {pd}x{ph}x{pw}')
 
-        d_offs = self._centered_offsets(D)
-        h_offs = self._centered_offsets(H)
-        w_offs = self._centered_offsets(W)
-        ps = self.patch_size
+        positions = []
+        for d in self._core_stats(D, pd):
+            for h in self._core_stats(H, ph):
+                for w in self._core_stats(W, pw):
+                    core = ref[:, :, d:d + pd, h:h + ph, w:w + pw]
+                    if (core > self.body_thresh).float().mean() >= self.min_body_fraction:
+                        positions.append((d - m, h - m, w - m))
 
-        for key in self.keys:
-            if key not in data:
-                if self.allow_missing_keys:
-                    continue
-                else:
-                    raise KeyError(f'Key {key} missing from data')
-            img = data[key]
-            patches = [
-                img[:, :, d:d+ps, h:h+ps, w:w+ps]
-                for d in d_offs
-                for h in h_offs
-                for w in w_offs
-            ]
+        if not positions:
+            raise ValueError('No validation crop contains enough body')
 
-            data[key] = torch.stack(patches, dim=0)
-        
-        return data
-    
-
-class GenerateNoiseScans(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False, dosage: float = 0.25, pixel_size_mm: float = 1.16, device: str | torch.device = 'cuda:0', slice_size: int = 16, max_proj: float = 120.0):
-        self.keys = keys
-        self.allow_missing_keys = allow_missing_keys
-        self.dosage = dosage
-        self.pixel_size_mm = pixel_size_mm
-        self.device = torch.device(device)
-        self.noise_model = None
-        self._noise_model_size = None
-        self.slice_size = slice_size
-        self.max_proj = max_proj
-
-    def _get_noise_model(self, image_size: int):
-        if self._noise_model_size != image_size:
-            self.noise_model = None
-            torch.cuda.empty_cache()
-            self.noise_model = SinogramNoise(
-                max_proj=self.max_proj,
-                b_type='Fan-Beam',
-                image_size=image_size,
-                dosage=self.dosage,
-                pixel_size_mm=self.pixel_size_mm,
-                device=self.device,
-            )
-
-            self._noise_model_size = image_size
-        
-        return self.noise_model
-        
-
-    def __call__(self, data: Dict):
-        max_list = []
         for key in self.keys:
             if key not in data:
                 if self.allow_missing_keys:
                     continue
                 raise KeyError(f'Key {key} missing from data')
-            
-            img = torch.as_tensor(data[key]).to(self.device)
+            img = data[key]
+            data[key] = torch.stack(
+                [img[:, :, d:d + pd + 2 * m, h:h + ph + 2 * m, w:w + pw + 2 * m]
+                 for d, h, w in positions], dim=0)
+        return data
+    
+
+class GenerateNoiseBatch(MapTransform):
+    def __init__(self, keys, allow_missing_keys=False, dosage: float = 0.25,
+                 i0_full: float = 1e5, i0_by_scan: dict | None = None,
+                 pixel_size_mm: float = 1.16,
+                 device: str | torch.device = 'cuda:0',
+                 slice_size: int = 16):
+        
+        self.keys = keys
+        self.allow_missing_keys = allow_missing_keys
+        self.dosage = dosage
+        self.i0_full = i0_full
+        self.i0_by_scan = i0_by_scan
+        self.pixel_size_mm = pixel_size_mm
+        self.device = torch.device(device)
+        self.slice_size = slice_size
+        self.noise_model = None
+        self.noise_model_size = None
+
+    def get_noise_model(self, image_size: int, i0: float):
+        if self.noise_model_size != image_size:
+            self.noise_model = SinogramNoise(
+                image_size=image_size, dosage=self.dosage, i0_full=i0,
+                pixel_size_mm=self.pixel_size_mm, b_type='Parallel-Beam',
+                electronic_std=10.0, n_angles=720,
+                hu_min=-1024.0, hu_max=3000.0
+            )
+
+            self.noise_model_size = image_size
+
+        self.noise_model.i0_full = i0
+        return self.noise_model
+        
+
+    def __call__(self, data: Dict):
+        scan = str(data['scan'])
+        if self.i0_by_scan is not None:
+            if scan not in self.i0_by_scan:
+                raise KeyError(f'{scan}: no fitted photon count')
+            i0 = float(self.i0_by_scan[scan])
+        else:
+            i0 = float(self.i0_full)
+
+        data['i0_full'] = i0
+        torch.manual_seed(zlib.crc32(scan.encode()))
+
+        for key in self.keys:
+            if key not in data:
+                if self.allow_missing_keys:
+                    continue
+                raise KeyError(f'Key {key} is missing from data')
+
+            img = torch.as_tensor(data[key])
             C, D, H, W = img.shape
-            noise_model = self._get_noise_model(H)
-
+            noise_model = self.get_noise_model(H, i0)
             
+
+            step = C * D if self.slice_size is None else self.slice_size
+            slices = img.reshape(C * D, H, W)
+            recon, noisy = [], []
             with torch.no_grad():
-                slices = img.reshape(C * D, H, W)
-                out_recon = torch.empty((C * D, H, W), dtype=torch.float32, device='cpu')
-                out_noisy = torch.empty((C * D, H, W), dtype=torch.float32, device='cpu')
+                for s in range(0, C * D, step):
+                    r, n = noise_model(slices[s:s + step].to(self.device))
+                    recon.append(r.cpu())
+                    noisy.append(n.cpu())
 
-                for s in range(0, C * D, self.slice_size):
-                   
-                    slab = slices[s:s+self.slice_size].to(self.device)
-                    #max_list.append(noise_model.compute_max_proj(slab))
-                    out_recon[s:s+self.slice_size], out_noisy[s:s+self.slice_size] = noise_model(slab)
-                data[key] = out_recon.reshape(C, D, H, W)
-                data[f'noisy_{key}'] = out_noisy.reshape(C, D, H, W)
+            data[key] = torch.cat(recon).reshape(C, D, H, W)
+            data[f'noise_{key}'] = torch.cat(noisy).reshape(C, D, H, W)
                     
-        #max_tensor = torch.cat(max_list)
-        #data['max_proj'] = torch.max(max_tensor)
-
         return data
     
 class ForegroundBBox(MapTransform):
@@ -288,23 +321,66 @@ class PadToSquare(MapTransform):
     
 
 class MidSlice(MapTransform):
-    def __init__(self, keys, allow_missing_keys = False):
+    def __init__(self, keys, allow_missing_keys=False, context=8):
+        """Visualization during training"""
         self.keys = keys
         self.allow_missing_keys = allow_missing_keys
+        self.context = context
 
     def __call__(self, data: Dict):
         ref_key = next(k for k in self.keys if k in data)
-        _, T, D, H ,W = data[ref_key].shape
+        D = data[ref_key].shape[2]
+        mid = D // 2
+        lo, hi = max(mid - self.context, 0), min(mid + self.context + 1, D)
 
         for key in self.keys:
             if key not in data:
                 if self.allow_missing_keys:
                     continue
-                else:
-                    raise KeyError(f'Key {key} missing from data')
-            img = data[key]
-            mid_d = D // 2
-            data[key] = img[:, :, mid_d-2:mid_d+2, :, :].unsqueeze(0)
+                raise KeyError(f'Key {key} missing from data')
+            data[key] = data[key][:, :, lo:hi].unsqueeze(0)
+        return data
+
+
+class AssertPhasesAligned(MapTransform):
+    def __init__(self, keys, allow_missing_keys = False, ref_key = 'phase_01'):
+        self.keys = keys
+        self.allow_missing_keys = allow_missing_keys
+        self.ref_key = ref_key
+
+    def __call__(self, data: Dict):
+        ref_shape = tuple(data[self.ref_key].shape)
+        for key in self.keys:
+            if key not in data:
+                if self.allow_missing_keys:
+                    continue
+                raise KeyError(f'Key {key} missing from data')
+
+            if tuple(data[key].shape) != ref_shape:
+                raise ValueError(f'{data.get("scan")}: {key} has shape {tuple(data[key].shape)},   '
+                                 f'expected {ref_shape}')
+
+
 
         return data
+
+class ApplyHUOffset(MapTransform):
+    def __init__(self, keys, offsets, allow_missing_keys = False):
+        self.keys = keys
+        self.offsets = offsets
+        self.allow_missing_keys = allow_missing_keys
+
+    def __call__(self, data: Dict):
+        offset = self.offsets.get(str(data['scan']), 0.0)
+        if offset:
+            for key in self.keys:
+                if not key in data:
+                    if self.allow_missing_keys:
+                        continue
+                    raise KeyError(f'Key {key} missing from train data')
+                data[key] = data[key] + offset
+
+        return data
+
+
 

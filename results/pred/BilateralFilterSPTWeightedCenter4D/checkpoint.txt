@@ -1,0 +1,1 @@
+/home/dpietsch/4DCT/parameters/BilateralFilterSPTWeightedCenter4D_epoch55_loss0.000053.pth
