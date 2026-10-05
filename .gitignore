@@ -5,6 +5,7 @@ animations/*
 !animations/.gitkeep
 logs/
 parameters/
+*.png
 *.npy
 *.nii
 datainfo/
