@@ -57,7 +57,7 @@ class SinogramNoise(BaseClassNoise):
             magnification = (s_dist + d_dist) / s_dist
             det_count = int(np.ceil(self.image_size * np.sqrt(2) * magnification)) + 2
             self.radon = FanBeam(det_count, np.linspace(0, 2 * np.pi, self.n_angles, endpoint=False),
-                                 src_dist=s_dist, det_dist=d_tist)
+                                 src_dist=s_dist, det_dist=d_dist)
         else:
             raise ValueError(f'Unsupported beam type, got {self.b_type}, expected one of [Parallel-Beam, Fan-Beam]')
 

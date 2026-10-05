@@ -53,8 +53,6 @@ __global__ void BilateralFilterCudaKernel4DLutForward(
     const int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
     // The home intensity is fixed for this thread: locate it once.
-    // (C == 1 is enforced in Python; the channel loops below are kept for
-    // structural parity with the original code.)
     const scalar_t homeValue = input[batchOffset + homeOffset];
     int homeBin;
     scalar_t homeFrac;

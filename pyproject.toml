@@ -18,7 +18,7 @@ dependencies = [
 	"tqdm",
 	"monai",
 	"matplotlib",
-	"torch-radon ; sys_platform == 'linux' and python_version == '3.12'",
+	#"torch-radon ; sys_platform == 'linux' and python_version == '3.12'",
 	"pybind11",
 	"wandb",
 	"npy-reader>=1.1.2",
@@ -49,7 +49,7 @@ no-build-isolation-package = [
 torch = { index = "pytorch-cu124" }
 torchvision = { index = "pytorch-cu124" }
 torchmetrics = { index = "pytorch-cu124" }
-torch-radon = { path = "../torch-radon/dist/torch_radon-0.0.0-cp312-cp312-linux_x86_64.whl"}
+#torch-radon = { path = "../torch-radon/dist/torch_radon-0.0.0-cp312-cp312-linux_x86_64.whl"}
 bilateralfilter4D-torch = { path = "models/BilateralFilter4D", editable = true }
 bilateralfilter3D-torch = { path = "models/BilateralFilter3D", editable = true }
 bilateralfilter4D-torch-spt = { path = "models/SpatioTemporalFilter", editable = true }

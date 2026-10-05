@@ -49,7 +49,7 @@ def default_window_sizes(sigma_x, sigma_y, sigma_z, window_size_t=9):
     assert window_size_t % 2 == 1, 'Window Size must be odd'
     return (window_size_t, w(sigma_x), w(sigma_y), w(sigma_z))
 
-def inverse_softplus(y: torch.Tensor, eps: float =1e-6):
+def inverse_softplus(y: torch.Tensor, eps: float = 1e-12):
     y = y.clamp_min(eps)
     return y + torch.log(-torch.expm1(-y))
 
