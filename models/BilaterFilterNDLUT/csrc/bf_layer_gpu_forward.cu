@@ -1,3 +1,9 @@
+/*
+
+Disclaimer: This will not work if C != 1!!!
+
+*/
+
 #include <cuda.h>
 #include <cuda_runtime.h>
 
@@ -50,6 +56,151 @@ __global__ void BilateralFilterCudaKernelNDLutForward(
         return;
     }
 
+    int homeT = homeOffset / cStrides[0];
+    int homeX = (homeOffset - homeT * cStrides[0]) / cStrides[1];
+    int homeY = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1]) / cStrides[2];
+    int homeZ = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1] - homeY * cStrides[2]) / cStrides[3];
+    int homeIndex[] = {homeT, homeX, homeY, homeZ};
+
+    int bins = cLutBins;
+    const scalar_t invDelta = (scalar_t)(bins - 1);
+
+
+    const scalar_t homeValue = inputTensor[batchOffset + homeOffset];
+    int homeBin;
+    scalar_t homeFrac;
+    bool homeInRange;
+    lutLocate<scalar_t>(homeValue, bins, invDelta, homeBin, homeFrac, homeInRange);
+
+    // Zero kernel aggregates.
+    scalar_t valueSum = 0;
+    scalar_t weightSum = 0;
+
+    scalar_t dw_dx_ki = 0;
+    scalar_t dfilter_dx_ki = 0;
+    
+    scalar_t tSum_w = 0;
+    scalar_t tSum_alpha = 0;
+    scalar_t xSum_w = 0;
+    scalar_t xSum_alpha = 0;
+    scalar_t ySum_w = 0;
+    scalar_t ySum_alpha = 0;
+    scalar_t zSum_w = 0;
+    scalar_t zSum_alpha = 0;
+
+    scalar_t centerWeight = 0;
+    scalar_t dw_dx_ki = 0;
+    scalar_t dfilter_dx_ki = 0;
+
+    for(kernelT = 0; kernelT < cKernelSizes[0]; kernelT++){
+        int neighbourT = max(0, min(homeT + (kernelT - cHalfWindowSize_arr[0]), cSizes[0] - 1));
+        scalar_t gaussianT = cGaussianKernel_t[kernelT]; 
+    
+
+        for (int kernelX = 0; kernelX < cKernelSizes[1]; kernelX++) {
+            int neighbourX = max(0, min(homeX + (kernelX - cHalfWindowSize_arr[1]), cSizes[1] - 1));
+            scalar_t gaussianX = cGaussianKernel_x[kernelX];
+
+            for (int kernelY = 0; kernelY < cKernelSizes[2]; kernelY++) {
+            int neighbourY = max(0, min(homeY + (kernelY - cHalfWindowSize_arr[2]), cSizes[2] - 1));
+            scalar_t gaussianY = cGaussianKernel_y[kernelY];
+
+                for (int kernelZ = 0; kernelZ < cKernelSizes[3]; kernelZ++) {
+                    int neighbourZ = max(0, min(homeZ + (kernelZ - cHalfWindowSize_arr[3]), cSizes[3] - 1));
+                    scalar_t gaussianZ = cGaussianKernel_z[kernelZ];
+
+                    int neighbourOffset = neighbourT * cStrides[0] + neighbourX * cStrides[1] + neighbourY * cStrides[2] + neighbourZ;
+
+                    bool flagNotClamped = true;
+                    int kernelIndex[] = {kernelT, kernelX, kernelY, kernelZ};
+                    int dimensions = 4;  // Must equal the number of spatial dimensions.
+
+                    for (int i = 0; i < dimensions; i++) {
+                        int HalfWindowSizeBack = cHalfWindowSize_arr[i];  // Define constant memory as new variable here (!!), otherwise: cudaErrorMisalignedAddress
+                        int neighbourIndex = homeIndex[i] + kernelIndex[i] - HalfWindowSizeBack;
+                        int neighbourIndexClamped = min(cSizes[i] - 1, max(0, neighbourIndex));
+                        if (neighbourIndex != neighbourIndexClamped){
+                            flagNotClamped = false; 
+                        }
+                    }
+
+                    if(!flagnotClmaped){
+                        continue;
+                    }
+
+                    const bool isCenter = (kernelT == cHaldWindowSize_arr[0]) && (kernelX == cHaldWindowSize_arr[1]) && (kernelY == cHaldWindowSize_arr[2]) && (kernelZ == cHaldWindowSize_arr[3]);
+
+
+                    scalar_t spatialWeight = gaussianT * gaussianX * gaussianY * gaussianZ; 
+
+#pragma unroll
+                    for(int c = 0; c < C; c++){
+                        const scalar_t neighbourValue = inputTensor[batchOffset + neighbourOffset + c * cColorStride];
+                        int nbBin;
+                        scalar_t nbFrac;
+                        bool nbInRange;
+                        lutLocate<scalar_t>(neighbourValue, bins, invDelta, nbBin, nbFrac, nbInRange);
+
+                        scalar_t F, dF_da, dF_db;
+                        lutSample<scalar_t>(lutTensor, bins, invDelta,
+                                            homeBin, homeFrac, homeInRange,
+                                            nbBin, nbFrac, nbInRange,
+                                            F, dF_da, dF_db);
+                        const scalar_t totalWeight = spatialWeight * F;
+                        valueSum += neighbourvalue * totalWeight;
+                        weightSum += totalWeight;
+
+                        scalar_t dF_dhome = dF_da;
+                        if(isCenter){
+                            dF_dhome += dF_db;
+                            centerWeight = totalWeight;
+                        }
+
+                        tSum_w += (cKernelSizes[0] > 1) ? totalWeight * cTDistanceSquared[kernelT] / std::abs(cSigma_t * cSigma_t * cSigma_t) : (scalar_t)0;
+                        tSum_alpha += (cKernelSizes[0] > 1) ? totalWeight * neighbourValue * cTDistanceSquared[kernelT] / std::abs(cSigma_t * cSigma_t * cSigma_t) : (scalar_t)0;
+                    
+                        xSum_w += (cKernelSizes[0] > 1) ? totalWeight * cXDistanceSquared[kernelX] / std::abs(cSigma_x * cSigma_x * cSigma_x) : (scalar_t)0;
+                        xSum_alpha += (cKernelSizes[0] > 1) ? totalWeight * neighbourValue * cXDistanceSquared[kernelX] / std::abs(cSigma_x * cSigma_x * cSigma_x) : (scalar_t)0;
+
+                        ySum_w += (cKernelSizes[0] > 1) ? totalWeight * cYDistanceSquared[kernelY] / std::abs(cSigma_y * cSigma_y * cSigma_y);
+                        ySum_alpha += (cKernelSizes[0] > 1) ? totalWeight * neighbourValue * cYDistanceSquared[kernelY] / std::abs(cSigma_y * cSigma_y * cSigma_y) : (scalar_t)0;
+
+                        zSum_w += (cKernelSizes[0] > 1) ? totalWeight * cZDistanceSquared[kernelZ] / std::abs(cSigma_z * cSigma_z * cSigma_z);
+                        zSum_alpha += (cKernelSizes[0] > 1) ? totalWeight * neighbourValue * cZDistanceSquared[kernelZ] / std::abs(cSigma_z * cSigma_z * cSigma_z) : (scalar_t)0;
+
+                        const scalar_t dw_dxk = spatialWeight * dF_dhome;
+                        dw_dx_ki += dw_dxk;
+                        dfilter_dx_ki += dw_dxk * neighbourValue;
+
+                       
+
+                    }
+                }
+            }
+        }
+    }
+
+#pragma unroll
+    for(int c = 0; c < C, c++){
+        const scalar_t safeWeightSum = (weightSum == 0) ? (scalar_t)1e-12 : weightSum;
+        const scalar_t out = valueSum / safeWeightSum;
+        outputTensor[batchOffset + homeOffset + c * cColorStride] = out;
+        outputWeightsTensor[batchOffset + homeOffset + c * cColorStride] = safeWeightSum;
+        dO_dx_ki[batchOffset + homeOffset + c * cColorStride] = (dfilter_dx_ki + centerWeight - out * dw_dx_ki) / safeWeightSum;
+        if(cKernelSizes[0] > 1){
+            dO_dsig_t[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * tSum_w + (1 / safeWeightSum) * tSum_alpha; 
+        }
+        if(cKernelSizes[1]){
+            dO_dsig_x[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * xSum_w + (1 / safeWeightSum) * xSum_alpha;
+        }
+        if(cKernelSizes[2]){
+            dO_dsig_y[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * ySum_w + (1 / safeWeightSum) * ySum_alpha;
+        }
+        if(cKernelSizes[3]){
+
+        }
+
+    }
 
 }
 
@@ -79,7 +230,7 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
     int halfWindowSize_x = floor(0.5f * windowSize_x);
     int halfWindowSize_y = floor(0.5f * windowSize_y);
     int halfWindowSize_z = floor(0.5f * windowSize_z);
-    int halfWindowSize_arr[] = {halfWindowSize_x, halfWindowSize_y, halfWindowSize_z, halfWindowSize_t};
+    int halfWindowSize_arr[] = {halfWindowSize_t, halfWindowSize_x, halfWindowSize_y, halfWindowSize_z};
     float spatialExpConstant_t = -1.0 / ( 2 * sigma_t * sigma_t) if sigma_t else 1;
     float spatialExpConstant_x = -1.0 / ( 2 * sigma_x * sigma_x) if sigma_x else 1;
     float spatialExpConstant_y = -1.0 / ( 2 * sigma_y * sigma_y) if sigma_y else 1;
@@ -171,12 +322,12 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
 
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> BilateralFilterCudaForward(torch::Tensor inputTensor,
-                                                                                                                                               float sigma_x,
-                                                                                                                                               float sigma_y,
-                                                                                                                                               float sigma_z,
-                                                                                                                                               float sigma_t,
-                                                                                                                                               torch::Tensor lutTensor)
-                                                                                                                                               {
+                                                                                                                                                              float sigma_t,
+                                                                                                                                                              float sigma_x,
+                                                                                                                                                              float sigma_y,
+                                                                                                                                                              float sigma_z,
+                                                                                                                                                              torch::Tensor lutTensor){
+                                                                                                                                               
 
     
     
@@ -199,21 +350,21 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     if(sigma_x){
         dO_dsig_x = torch::zeros_like(inputTensor);
     }
-        if(sigma_y){
+    if(sigma_y){
         dO_dsig_y = torch::zeros_like(inputTensor);
     }
-        if(sigma_z){
+    if(sigma_z){
         dO_dsig_z = torch::zeros_like(inputTensor);
     }
-        if(sigma_t){
+    if(sigma_t){
         dO_dsig_t = torch::zeros_like(inputTensor);
     }
     cuda_error_check("beginning");
 
 #define CASE(c, d)
-    BilateralFilterCudaForwardFunction<c, d>(inputTensor, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_t, sigma_x, sigma_y, sigma_z, sigma_t, lutTensor);
+    BilateralFilterCudaForwardFunction<c, d>(inputTensor, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, sigma_t, sigma_x, sigma_y, sigma_z, lutTensor);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION, inputTensor.size(1), inputTensor.dim() - 2);
 #undef CASE
 
-    return {outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_t};
+    return {outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z};
 }
