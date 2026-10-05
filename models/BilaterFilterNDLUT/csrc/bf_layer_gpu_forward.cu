@@ -190,14 +190,14 @@ __global__ void BilateralFilterCudaKernelNDLutForward(
         if(cKernelSizes[0] > 1){
             dO_dsig_t[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * tSum_w + (1 / safeWeightSum) * tSum_alpha; 
         }
-        if(cKernelSizes[1]){
+        if(cKernelSizes[1] > 1){
             dO_dsig_x[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * xSum_w + (1 / safeWeightSum) * xSum_alpha;
         }
-        if(cKernelSizes[2]){
+        if(cKernelSizes[2] > 1){
             dO_dsig_y[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * ySum_w + (1 / safeWeightSum) * ySum_alpha;
         }
-        if(cKernelSizes[3]){
-
+        if(cKernelSizes[3] > 1){
+            dO_dsig_z[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * zSum_w
         }
 
     }
