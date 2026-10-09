@@ -95,7 +95,7 @@ class CropBatchTrain(MapTransform):
                  allow_missing_keys = False,
                  num_crops=8,
                  patch_size=(32, 64, 64),
-                 margin=8,
+                 margin=(8, 8, 8),
                  body_thresh=0.018,
                  min_body_fraction=0.5,
                  attempts=20):
@@ -110,9 +110,9 @@ class CropBatchTrain(MapTransform):
 
     def __call__(self, data: Dict):
         pd, ph, pw = self.patch_size
-        size_d, md = pd + 2 * self.margin, self.margin
-        size_h, mh = ph + 2 * self.margin, self.margin
-        size_w, mw = pw + 2 * self.margin, self.margin
+        size_d, md = pd + 2 * self.margin[0], self.margin[0]
+        size_h, mh = ph + 2 * self.margin[1], self.margin[1]
+        size_w, mw = pw + 2 * self.margin[2], self.margin[2]
         _, _, D, H, W = data['clean'].shape
         if D < size_d or H < size_h or W < size_w:
             raise ValueError(f'volume {D}x{H}x{W} smaller than crop {self.patch_size}')
@@ -142,7 +142,7 @@ class CropBatchValidation(MapTransform):
                  source_key='clean',
                  num_crops_per_dim=4,
                  patch_size=(32, 64, 64),
-                 margin=8,
+                 margin=(8, 8, 8),
                  body_thresh=0.018,
                  min_body_fraction=0.5):
         self.keys = keys
@@ -154,26 +154,26 @@ class CropBatchValidation(MapTransform):
         self.body_thresh = body_thresh
         self.min_body_fraction = min_body_fraction
 
-    def _core_stats(self, dim_size, ps):
-        usable = dim_size - 2 * self.margin
+    def _core_stats(self, dim_size, ps, margin):
+        usable = dim_size - 2 * margin
         n = max(1, min(self.num_crops_per_dim, usable // ps))
-        first = self.margin + (usable - n * ps) // 2
+        first = margin + (usable - n * ps) // 2
         return [first + i * ps for i in range(n)]
 
     def __call__(self, data: Dict):
         (pd, ph, pw), m = self.patch_size, self.margin
         ref = data[self.source_key]
         _, _, D, H, W = ref.shape
-        if D < pd + 2 * m or H < ph + 2 * m or W < pw + 2 * m:
+        if D < pd + 2 * m[0] or H < ph + 2 * m[1] or W < pw + 2 * m[2]:
             raise ValueError(f'volume {D}x{H}x{W} smaller than crop {pd}x{ph}x{pw}')
 
         positions = []
-        for d in self._core_stats(D, pd):
-            for h in self._core_stats(H, ph):
-                for w in self._core_stats(W, pw):
+        for d in self._core_stats(D, pd, m[0]):
+            for h in self._core_stats(H, ph, m[1]):
+                for w in self._core_stats(W, pw, m[2]):
                     core = ref[:, :, d:d + pd, h:h + ph, w:w + pw]
                     if (core > self.body_thresh).float().mean() >= self.min_body_fraction:
-                        positions.append((d - m, h - m, w - m))
+                        positions.append((d - m[0], h - m[1], w - m[2]))
 
         if not positions:
             raise ValueError('No validation crop contains enough body')
@@ -185,7 +185,7 @@ class CropBatchValidation(MapTransform):
                 raise KeyError(f'Key {key} missing from data')
             img = data[key]
             data[key] = torch.stack(
-                [img[:, :, d:d + pd + 2 * m, h:h + ph + 2 * m, w:w + pw + 2 * m]
+                [img[:, :, d:d + pd + 2 * m[0], h:h + ph + 2 * m[1], w:w + pw + 2 * m[2]]
                  for d, h, w in positions], dim=0)
         return data
     

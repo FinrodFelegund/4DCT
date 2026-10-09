@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from data.dataset import CTTrainDataset, CTValidationDataset
 from models.filterbank import FilterBank
+from models.cnn import CNN
 from utils.processing import interior
 from utils.explore_sigmas import sweep_sigmas
 
@@ -38,27 +39,24 @@ def group_of(name: str) -> str:
         return 'center'
     return 'spatiotemporal'
 
-def build_optimizer(model: torch.nn.Module, config: Dict):
-    optim_config = config.get('optim', {})
-    lrs = {
-        'spatiotemporal': optim_config.get('lr_st', config.get('lr_st', 0.01)),
-        'center': optim_config.get('lr_center', config.get('lr_st', 0.01)),
-        'range': optim_config.get('lr_r', config.get('lr_r', 0.01)),
-        'kernel': optim_config.get('lr_kernel', 1e-3),
-        'lut': optim_config.get('lr_lut', 1e-3),
+def learning_rates(config):
+    optim_cfg = config.get('optim', {})
+    return {
+        'spatial': optim_cfg.get('lr_sp', 0.01),
+        'temporal': optim_cfg.get('lr_t', 0.01),
+        'spatiotemporal': optim_cfg.get('lr_spt', 0.01),
+        'range': optim_cfg.get('lr_r', 0.005),
+        'center': optim_cfg.get('lr_center', 0.01),
+        'kernel': optim_cfg.get('lr_kernel', 1e-3),
+        'lut': optim_cfg.get('lr_lut', 1e-3),
+        'network': optim_cfg.get('lr_network', 1e-4)
     }
 
-    buckets = {key: [] for key in lrs}
-    for name, param in model.named_parameters():
-        buckets[group_of(name)].append(param)
-
-    groups = [{'params': params, 'lr': lrs[key], 'weight_decay': 0.0}
-              for key, params in buckets.items() if params]
-    
-    for key, params in buckets.items():
-        if params:
-            print(f'optimizer group {key}: {len(params)} tensors, lr {lrs[key]}')
-
+def build_optimizer(model, config):
+    lr = learning_rates(config)
+    groups = model.parameter_groups(lr)
+    for g in groups:
+        print(f'optimizer group {g['name']}: {sum(p.numel() for p in g['params'])} values, lr {g['lr']}')
     return torch.optim.Adam(groups)
 
 @torch.no_grad()
@@ -71,6 +69,9 @@ def clamp_parameters(model: torch.nn.Module, config: Dict):
     center_min = clamp_cfg.get('center_min', 0.0)
     center_max = clamp_cfg.get('center_max', 10.0)
     kernel_min = clamp_cfg.get('kernel_min', 0.0)
+
+    if isinstance(model, CNN):
+        return
 
     for name, param in model.named_parameters():
         if name.rsplit('.', 1)[-1].startswith('log_'):
@@ -87,10 +88,12 @@ def clamp_parameters(model: torch.nn.Module, config: Dict):
         elif group == 'skip':
             continue
 
-def preview_grid(model, validation_dataset, device):
+def preview_grid(model, validation_dataset, device, crop=192):
     """Centre slice of ground truth, prediction and input, side by side."""
     clean, noisy = validation_dataset.get_whole_slice()
-    clean, noisy = clean.to(device), noisy.to(device)
+    H, W = clean.shape[-2:]
+    y0, x0 = max((H - crop) // 2, 0), max((W - crop) // 2, 0)
+    clean, noisy = clean[..., y0:y0 + crop, x0:x0 + crop].to(device), noisy[..., y0:y0 + crop, x0:x0 + crop].to(device)
     forward = getattr(model, 'forward_volume', model)
     pred = forward(noisy)
     t = pred.shape[2] // 2
@@ -101,34 +104,39 @@ def preview_grid(model, validation_dataset, device):
     grid_soft = make_grid(to_display(panel, lo=SOFT_LO, hi=SOFT_HI), nrow=3, normalize=False, pad_value=1.0)
     return (grid_lung * 255).round().to(torch.uint8).cpu(), (grid_soft * 255).round().to(torch.uint8).cpu()
 
-def validate(model, dataloader, dataset, criterion, psnr_metric, ssim_metric, device, amp_dtype, epoch, epochs, margin):
+def validate(model, dataloader, dataset, criterion, psnr_metric, ssim_metric, device, amp_dtype, epoch, epochs, margin, chunk=8):
     model.eval()
     psnr_metric.reset()
     ssim_metric.reset()
-    val_loss, n_batches, grid_lung, grid_soft = 0.0, 0, None, None
+    val_loss, n_scans, grid_lung, grid_soft = 0.0, 0, None, None
     pbar = tqdm(dataloader, desc=f'Epoch {epoch + 1}/{epochs} [VALIDATION]')
 
     with torch.no_grad():
         for i, (clean, noisy) in enumerate(pbar):
-            with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
-                    clean = interior(clean.to(device), margin)
-                    noisy = noisy.to(device)
-                    prediction = interior(model(noisy), margin)
+            scan_loss, scan_crops = 0.0, 0
+            for c, n in zip(clean.split(chunk), noisy.split(chunk)):
+                with torch.amp.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_dtype is not None):
+                    c, n = interior(c.to(device), margin), n.to(device)
+                    prediction = interior(model(n), margin)
 
-                    val_loss += criterion(prediction, clean).item()
-                    n_batches += 1
-                    psnr_metric.update(prediction, clean)
+                    scan_loss += criterion(prediction, c).item() * c.shape[0]
+                    scan_crops += c.shape[0]
+                    psnr_metric.update(prediction, c)
 
                     B, C, T, D, H, W = prediction.shape
                     ssim_metric.update(prediction.reshape(B * T * D, C, H, W),
-                                       clean.reshape(B * T * D, C, H, W))
-                    pbar.set_postfix(Image=i + 1, Patches=clean.shape[0])
+                                    c.reshape(B * T * D, C, H, W))
+                    
+                del c, n, prediction
+            val_loss += scan_loss / scan_crops
+            n_scans += 1
+            pbar.set_postfix(Image=i + 1, Patches=scan_crops)
 
             if grid_lung is None and grid_soft is None:
                 grid_lung, grid_soft = preview_grid(model, dataset, device)
 
     model.train()
-    return (val_loss / max(n_batches, 1),
+    return (val_loss / max(n_scans, 1),
             psnr_metric.compute().item(),
             ssim_metric.compute().item(),
             grid_lung, grid_soft)
@@ -139,7 +147,7 @@ def resolve_amp(config: Dict):
         return None
     
     stage_types = {stage['type'] for stage in config['model']['stages']}
-    if stage_types & {'learnable_spt4d', 'lut4d'}:
+    if stage_types & {'learnable_spt4d', 'lut4d', 'ndlut', 'nd'}:
         print('amp disabled: a selected stage has no half-precision CUDA dispatch.')
         return None
     
@@ -157,23 +165,29 @@ def train(config: Dict):
                name=config['name'], config=config)
     
     device = torch.device('cuda')
-    model = FilterBank(config['model']['stages']).to(device)
+    model_cfg = config.get('model')
+    if isinstance(model_cfg, dict):
+        model = CNN(model_cfg['stages']).to(device)
+    else:
+        model = FilterBank(model_cfg['stages']).to(device)
     print(model)
 
+    transform_params = config.get('crop')
+    margin = transform_params.get('margin')
     dataframe = CTTrainDataset.generate_dataframe(config['train_data'])
     dataframe = dataframe.sample(frac=1.0, random_state=config.get('split_seed', 0))
     n_train = int(config.get('num_train_scans', 30))
 
     train_dataset = CTTrainDataset(dataframe=dataframe.iloc[:n_train],
-                                   transforms=CTTrainDataset.get_train_transforms())
+                                   transforms=CTTrainDataset.get_train_transforms(**transform_params))
     
     validation_dataset = CTValidationDataset(dataframe=dataframe[n_train:],
-                                             transforms=CTValidationDataset.get_validation_transforms(),
+                                             transforms=CTValidationDataset.get_validation_transforms(**transform_params),
                                              scan_transforms=CTValidationDataset.get_scan_transforms())
     wandb.config.update({'validation_scans': list(dataframe.index[n_train:])})
 
     batch_size = config.get('batch_size', 1)
-    margin = 8
+
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True,
                                   num_workers=config.get('num_workers', 4),
                                   collate_fn=CTTrainDataset.collate_fn)
@@ -232,7 +246,7 @@ def train(config: Dict):
         wandb.log({'Train/Mean-Loss-Epoch': epoch_loss / len(train_dataloader),
                    'Train/Epoch': epoch + 1})
     
-        if epoch % validate_every:
+        if epoch % validate_every and epoch != epochs - 1:
             continue
 
         val_loss, val_psnr, val_ssim, grid_lung, grid_soft = validate(

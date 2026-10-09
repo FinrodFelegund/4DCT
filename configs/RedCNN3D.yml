@@ -1,0 +1,13 @@
+name: RedCNN3d
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 60
+batch_size: 1
+amp: false
+model:
+  stages:
+    type: redcnn3d
+    params: {phases: 10, channels: 96, kernel: [5, 5, 3]}
+optim: {lr_network: 1.0e-4}
+clamp: {}
+crop: {patch_size: [16, 64, 64], margin: [0, 20, 20], num_crops_train: 8, num_crops_validation: 8}

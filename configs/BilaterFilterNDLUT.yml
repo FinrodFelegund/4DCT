@@ -1,0 +1,22 @@
+name: BilateralFilterNDLUT
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 30
+amp: false
+reg_weight: 0.001
+model:
+  stages:
+    - type: ndlut
+      count: 10
+      params: [
+        {axes: ['xy'], sigma_x: 0.5, sigma_y: 0.5, color_sigma: 0.4, lut_bins: 96, lut_max: 0.503, symmetric_lut: true},
+        {axes: ['z'], sigma_z: 0.5, color_sigma: 0.4, lut_bins: 96, lut_max: 0.503, symmetric_lut: true},
+        {axes: ['xy'], sigma_x: 0.5, sigma_y: 0.5, color_sigma: 0.4, lut_bins: 96, lut_max: 0.503, symmetric_lut: true},
+        {axes: ['z'], sigma_z: 0.5, color_sigma: 0.4, lut_bins: 96, lut_max: 0.503, symmetric_lut: true},
+        {axes: ['xy'], sigma_x: 0.5, sigma_y: 0.5, color_sigma: 0.4, lut_bins: 96, lut_max: 0.503, symmetric_lut: true},
+        {axes: ['z'], sigma_z: 0.5, color_sigma: 0.4, lut_bins: 96, lut_max: 0.503, symmetric_lut: true},
+        {axes: ['t'], sigma_t: 0.5, color_sigma: 0.05, lut_bins: 96, lut_max: 0.503, symmetric_lut: true}
+      ]
+optim: {lr_sp: 0.01, lr_t: 0.01, lr_lut: 0.001}
+clamp: {sigma_min: 0.01, sigma_max: 2.0}
+crop: {patch_size: [32, 64, 64], margin: [8, 8, 8], num_crops: 8}

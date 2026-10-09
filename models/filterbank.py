@@ -24,11 +24,21 @@ def _lut4d(**kwargs):
     from bilateral_filter_layer_4d_lut import BilateralFilter4DLUT
     return BilateralFilter4DLUT(**kwargs)
 
+def _nd(**kwargs):
+    from bilateral_filter_layer_nd import BilateralFilterNd
+    return BilateralFilterNd(**kwargs)
+
+def _ndlut(**kwargs):
+    from bilater_filter_layer_nd_lut import BilaterFilterNdLUT
+    return BilaterFilterNdLUT(**kwargs)
+
 STAGE_BUILDERS = {
     'spatial3d': _spatial3d,
     'temporal4d': _temporal4d,
     'spt4d': _spt4d,
     'centerweight4d': _centerweight4d,
+    'nd': _nd,
+    'ndlut': _ndlut,
     'learnable_spt4d': _learnable_spt4d,
     'lut4d': _lut4d,
 }
@@ -78,6 +88,24 @@ class FilterBank(torch.nn.Module):
             total = penalty if total is None else total + penalty
 
         return total
+
+    def parameter_groups(self, lr):
+        groups = []
+        for stage_name, stage in zip(self.stage_names, self.stages):
+            if not hasattr(stage, 'parameter_groups'):
+                raise TypeError(f'{stage_name}: {type(stage).__name__} has no parameter_groups(lr) function')
+            for group in stage.parameter_groups(lr):
+                if group['params']:
+                    groups.append({**group, 'name': f'{stage_name}/{group['name']}'})
+
+        grouped = [id(p) for g in groups for p in g['params']]
+        if len(grouped) != len(set(grouped)):
+            raise ValueError('a parameter appears in more than one optimizer group')
+        missing = [n for n, p in self.named_parameters() if p.requires_grad and id(p) not in set(grouped)]
+        if missing:
+            raise ValueError(f'trainable parameters without an optimizer group: {missing}')
+
+        return groups
 
     def __repr__(self):
         for stage in self.stages:

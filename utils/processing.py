@@ -1,13 +1,12 @@
 import os
 from pathlib import Path
-from .noise import SinogramNoise
-import nibabel as nib
+from typing import Tuple
+
 import numpy as np
 import torch
-from tqdm import tqdm
 import plotly.express as px
 import pandas as pd
-import matplotlib.pyplot as plt
+
 #from data.dataset import 
 
 DATASETPATH = r'/home/dpietsch/Pictures/Inhouse1'
@@ -101,8 +100,12 @@ def body_box(volume, pad=0, thresh=BODY_THRESH):
     return (max(int(ys[0]) - pad, 0), min(int(ys[-1]) + 1 + pad, H),
             max(int(xs[0]) - pad, 0), min(int(xs[-1]) + 1 + pad, W))
 
-def interior(x: torch.Tensor, margin: int):
-    return x if margin <= 0 else x[..., margin:-margin, margin:-margin, margin:-margin]
+def interior(x: torch.Tensor, margin: Tuple):
+    if np.any(np.array(margin) <= 0):
+        return x
+    return x[..., margin[0]:-margin[0], margin[1]:-margin[1], margin[2]:-margin[2]]
 
-def inplane_interior(x: torch.Tensor, margin: int):
-    return x if margin <= 0 else x[..., margin:-margin, margin:-margin]
+def inplane_interior(x: torch.Tensor, margin: Tuple):
+    if np.any(np.array(margin) <= 0):
+        return x
+    return x[..., margin[0]:-margin[0], margin[1]:-margin[1], margin[2]:-margin[2]]

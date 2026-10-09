@@ -111,7 +111,7 @@ class CTTrainDataset(Dataset):
     
     
     @staticmethod
-    def get_train_transforms(num_crops=8, patch_size=(32, 64, 64), margin=8):
+    def get_train_transforms(num_crops_train=8, patch_size=(32, 64, 64), margin=(8, 8, 8), **kwargs):
         clean_keys = [f'phase_0{i}' for i in range(10)]
         noise_keys = [f'noise_phase_0{i}' for i in range(10)]
         transforms = Compose([
@@ -129,8 +129,8 @@ class CTTrainDataset(Dataset):
             DeleteItemsd(keys=clean_keys + noise_keys),
             EnsureChannelDimension(keys=['clean', 'noise']),
             EnsureTyped(keys=['clean', 'noise']),
-            ForegroundBBox(keys=['clean', 'noise'], min_size=max(patch_size[1:]) + 2 * margin),
-            CropBatchTrain(keys=['clean', 'noise'], num_crops=num_crops, patch_size=patch_size, margin=margin)
+            ForegroundBBox(keys=['clean', 'noise'], min_size=max(patch_size[1:]) + 2 * max(margin[1:])),
+            CropBatchTrain(keys=['clean', 'noise'], num_crops=num_crops_train, patch_size=patch_size, margin=margin)
         ])
 
         return transforms
@@ -225,7 +225,7 @@ class CTValidationDataset(Dataset):
     
     
     @staticmethod
-    def get_validation_transforms(num_crops=8, patch_size=(32, 64, 64), margin=8):
+    def get_validation_transforms(num_crops_validation=8, patch_size=(32, 64, 64), margin=(8, 8, 8), **kwargs):
         clean_keys = [f'phase_0{i}' for i in range(10)]
         noise_keys = [f'noise_phase_0{i}' for i in range(10)]
         transforms = Compose([
@@ -244,9 +244,9 @@ class CTValidationDataset(Dataset):
             EnsureChannelDimension(keys=['clean', 'noise']),
             #EnsureBatchDimension(keys=['clean', 'noise']),
             EnsureTyped(keys=['clean', 'noise']),
-            ForegroundBBox(keys=['clean', 'noise'], min_size=max(patch_size[1:]) + 2 * margin),
+            ForegroundBBox(keys=['clean', 'noise'], min_size=max(patch_size[1:]) + 2 * max(margin[1:])),
             CropBatchValidation(keys=['clean', 'noise'], 
-                                num_crops_per_dim=num_crops,
+                                num_crops_per_dim=num_crops_validation,
                                 patch_size=patch_size,
                                 margin=margin)
         ])

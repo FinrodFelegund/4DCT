@@ -18,18 +18,17 @@ dependencies = [
 	"tqdm",
 	"monai",
 	"matplotlib",
-	#"torch-radon ; sys_platform == 'linux' and python_version == '3.12'",
+	"torch-radon ; sys_platform == 'linux' and python_version == '3.12'",
 	"pybind11",
 	"wandb",
 	"npy-reader>=1.1.2",
 	"plotly>=6.8.0",
 	"scipy>=1.18.0",
-	"bilateralfilter4D-torch",
-	"bilateralfilter3D-torch",
-	"bilateralfilter4D-torch-spt",
 	"bilateralfilter4D-torch-centerweight",
 	"bilateralfilter4D-torch-learnable-spt",
-	"bilateralfilter4D-torch-lut"
+	"bilateralfilter4D-torch-lut",
+	"bilateralfilterND-torch",
+	"bilateralfilterND-torch-lut"
 ]
 
 [tool.uv]
@@ -37,25 +36,24 @@ dependencies = [
 		"sys_platform == 'linux' and platform_machine == 'x86_64'"
 	]
 no-build-isolation-package = [
-	"bilateralfilter4d-torch",
-	"bilateralfilter3d-torch",
-	"bilateralfilter4D-torch-spt",
 	"bilateralfilter4D-torch-centerweight",
 	"bilateralfilter4D-torch-learnable-spt",
-	"bilateralfilter4D-torch-lut"
+	"bilateralfilter4D-torch-lut",
+	"bilateralfilterND-torch",
+	"bilateralfilterND-torch-lut"
 ]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu124" }
 torchvision = { index = "pytorch-cu124" }
 torchmetrics = { index = "pytorch-cu124" }
-#torch-radon = { path = "../torch-radon/dist/torch_radon-0.0.0-cp312-cp312-linux_x86_64.whl"}
-bilateralfilter4D-torch = { path = "models/BilateralFilter4D", editable = true }
-bilateralfilter3D-torch = { path = "models/BilateralFilter3D", editable = true }
-bilateralfilter4D-torch-spt = { path = "models/SpatioTemporalFilter", editable = true }
-bilateralfilter4D-torch-centerweight = { path = "models/WeightedCenterFilter4D", editable = true}
-bilateralfilter4D-torch-learnable-spt = { path = "models/LearnableSpatialFilter4D", editable = true }
-bilateralfilter4D-torch-lut = { path= "models/AllLearnable4D", editable = true }
+torch-radon = { path = "../torch-radon/dist/torch_radon-0.0.0-cp312-cp312-linux_x86_64.whl"}
+
+bilateralfilter4D-torch-centerweight = { path = "models/BilateralFilter4DWeightedCenter", editable = true}
+bilateralfilter4D-torch-learnable-spt = { path = "models/BilateralFilterNDKernel", editable = true }
+bilateralfilter4D-torch-lut = { path = "models/BilateralFilterNDKernelLUT", editable = true }
+bilateralfilterND-torch = { path = "models/BilateralFilterND", editable = true }
+bilateralfilterND-torch-lut = { path = "models/BilateralFilterNDLUT", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cu124"

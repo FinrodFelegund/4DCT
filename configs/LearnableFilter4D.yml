@@ -5,12 +5,21 @@ epochs: 30
 amp: False
 model:
   stages:
-    - type: spatial3d
+    - type: learnable_spt4d
       count: 3
       params: [
-        {sigma_x: 0.5409, sigma_y: 0.2238, sigma_z: 0.6343, color_sigma: 0.4946},
-        {sigma_x: 0.2215, sigma_y: 0.6062, sigma_z: 0.2353, color_sigma: 0.4806},
-        {sigma_x: 0.2136, sigma_y: 0.5737, sigma_z: 0.2205, color_sigma: 0.3763}
+        {
+          sigma_t: 1.0, sigma_x: 0.5834, sigma_y: 0.2163, sigma_z: 0.6498,
+          color_sigma: 0.4794, window_size_t: 9, pad_t: 4, window_sizes: [1, 5, 5, 5], kernel_floor: 1e-6
+        },
+        {
+          sigma_t: 1.0, sigma_x: 0.2173, sigma_y: 0.2432, sigma_z: 0.2426,
+          color_sigma: 0.3195, window_size_t: 9, pad_t: 4, window_sizes: [1, 5, 5, 5], kernel_floor: 1e-6
+        },
+        {
+          sigma_t: 1.0, sigma_x: 0.2104, sigma_y: 0.7592, sigma_z: 0.2127,
+          color_sigma: 0.3521, window_size_t: 9, pad_t: 4, window_sizes: [1, 5, 5, 5], kernel_floor: 1e-6
+        }
       ]
     - type: learnable_spt4d
       count: 1
@@ -21,5 +30,6 @@ model:
           kernel_floor: 1e-6
         }
       ]
-optim: {lr_st: 0.01, lr_r: 0.005, lr_kernel: 0.01}
+optim: {lr_r: 0.005, lr_kernel: 0.05}
 clamp: {sigma_min: 0.01, sigma_max: 2.0, range_min: 0.0001}
+crop: {patch_size: [32, 64, 64], margin: [8, 8, 8], num_crops: 8}
