@@ -40,17 +40,18 @@ def inverse_softplus(y: torch.Tensor, eps: float = 1e-6):
 
 class BilaterFilterFunctionNdLUTGPU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_img: torch.Tensor, sigma_t: torch.nn.Parameter, sigma_x: torch.nn.Parameter, sigma_y: torch.nn.Parameter, sigma_z: torch.nn.Parameter, lut: torch.Tensor):
+    def forward(ctx, input_img: torch.Tensor, sigma_t: torch.nn.Parameter, sigma_x: torch.nn.Parameter, sigma_y: torch.nn.Parameter, sigma_z: torch.nn.Parameter, lut: torch.Tensor, pad_t: int):
         assert input_img.shape[1] == 1, 'Currently only one channel images are supported'
         assert input_img.dim() == 6, 'Input shape must be [B, C, T, H, W, D]'
         assert lut.dim() == 2 and lut.shape[0] == lut.shape[1], 'Look up table must be square tensor'
 
         input_img = input_img.contiguous()
         lut = lut.contiguous()
-        outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z = bilateral_filter_nd_lut_gpu_lib.forward_gpu(input_img, float(sigma_t), float(sigma_x), float(sigma_y), float(sigma_z), lut)
+        outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z = bilateral_filter_nd_lut_gpu_lib.forward_gpu(input_img, float(sigma_t), float(sigma_x), float(sigma_y), float(sigma_z), lut, pad_t)
 
         ctx.save_for_backward(input_img, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, lut)
         ctx.sigmas = tuple(float(s) for s in (sigma_t, sigma_x, sigma_y, sigma_z))
+        ctx.pad_t = pad_t
 
         return outputTensor
 
@@ -60,13 +61,13 @@ class BilaterFilterFunctionNdLUTGPU(torch.autograd.Function):
         input_img, outputTensor, outputWeightsTensor, dO_dx_ki, d_dsig_t, d_sig_x, d_sig_y, d_sig_z, lut = ctx.saved_tensors
         grad_output = grad_output.contiguous()
 
-        grad_input, grad_lut = bilateral_filter_nd_lut_gpu_lib.backward_gpu(grad_output, input_img, outputTensor, outputWeightsTensor, dO_dx_ki, *ctx.sigmas, lut)
+        grad_input, grad_lut = bilateral_filter_nd_lut_gpu_lib.backward_gpu(grad_output, input_img, outputTensor, outputWeightsTensor, dO_dx_ki, *ctx.sigmas, lut, ctx.pad_t)
         grad_sigmas = [torch.sum(grad_output * d_s) if ctx.needs_input_grad[i + 1] else None
                        for i, d_s in enumerate((d_dsig_t, d_sig_x, d_sig_y, d_sig_z))]
-        return (grad_input, *grad_sigmas, grad_lut)
+        return (grad_input, *grad_sigmas, grad_lut, None)
 
 
-class BilaterFilterNdLUT(torch.nn.Module):
+class BilateralFilterNdLUT(torch.nn.Module):
     def __init__(self, color_sigma, axes=('t', 'x', 'y', 'z'),
                  sigma_t=0.0, sigma_x=0.0, sigma_y=0.0, sigma_z=0.0,
                  lut_bins=96, lut_max=1.0, symmetric_lut=True, use_gpu=True, pad_t=4):
@@ -76,7 +77,7 @@ class BilaterFilterNdLUT(torch.nn.Module):
         if not 0.0 < float(lut_max) <= 1.0:
             raise ValueError(f'lut_max must be in (0,1], got {lut_max}')
 
-        unknow = set(axes) - ('t' , 'x', 'y', 'z')
+        unknow = set(axes) - {'t', 'x', 'y', 'z'}
         if unknow or not axes:
             raise ValueError(f'axes must be non-empty subset of t, x, y, z, got {axes}')
 
@@ -132,7 +133,7 @@ class BilaterFilterNdLUT(torch.nn.Module):
         lut = self.activated_lut().to(x.dtype)
 
         if self.use_gpu:
-            output = BilaterFilterFunctionNdLUTGPU.apply(x, self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, lut)
+            output = BilaterFilterFunctionNdLUTGPU.apply(x, self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, lut, self.pad_t)
         else:
             raise NotImplementedError('CPU is not supported')
         

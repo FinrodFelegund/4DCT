@@ -30,6 +30,8 @@ __constant__ float cXDistanceSquaredBack[256];
 __constant__ float cYDistanceSquaredBack[256];
 __constant__ float cZDistanceSquaredBack[256];
 
+__constant__ int cPadTBack;
+
 
 template<typename scalar_t, int C>
 __global__ void BilateralFilterCudaKernelNDLutBackward(const scalar_t* __restrict__ gradientInputTensor,
@@ -66,6 +68,8 @@ __global__ void BilateralFilterCudaKernelNDLutBackward(const scalar_t* __restric
         int homeZ = (homeOffset - homeT * cStridesBack[0] - homeX * cStridesBack[1] - homeY * cStridesBack[2]) / cStridesBack[3];
         int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
+        const bool homePadded = homeT < cPadTBack || homeT >= cSizesBack[0] - cPadTBack;
+
         const int home = homeOffset + batchOffset;
         const scalar_t homeValue = inputTensor[home];
         const scalar_t W_k = outputWeightsTensor[home];
@@ -79,6 +83,11 @@ __global__ void BilateralFilterCudaKernelNDLutBackward(const scalar_t* __restric
         for(int kernelT = 0; kernelT < cKernelSizesBack[0]; kernelT++){
             int neighbourT = max(0, min(homeT + (kernelT - cHalfWindowSize_arrBack[0]), cSizesBack[0] - 1));
             scalar_t gaussianT = cGaussianKernel_tBack[kernelT];
+
+            const bool neighbourPadded = (homeT + kernelT - cHalfWindowSize_arrBack[0]) < cPadTBack || (homeT + kernelT - cHalfWindowSize_arrBack[0]) >= cSizesBack[0] - cPadTBack;
+            if(homePadded && neighbourPadded){
+                continue;
+            }
 
             for(int kernelX = 0; kernelX < cKernelSizesBack[1]; kernelX++){
                 int neighbourX = max(0, min(homeX + (kernelX - cHalfWindowSize_arrBack[1]), cSizesBack[1] - 1));
@@ -110,29 +119,33 @@ __global__ void BilateralFilterCudaKernelNDLutBackward(const scalar_t* __restric
                         if(!flagNotClamped){
                             continue;
                         }
-
+                        
+                        
                         const bool isCenter = (kernelT == cHalfWindowSize_arrBack[0]) && (kernelX == cHalfWindowSize_arrBack[1]) && (kernelY == cHalfWindowSize_arrBack[2]) && (kernelZ == cHalfWindowSize_arrBack[3]);
                         scalar_t spatialWeight = gaussianT * gaussianX * gaussianY * gaussianZ;
                         const scalar_t neighbourValue = inputTensor[batchOffset + neighbourOffset];
-
+                        
                         int nbBin;
                         scalar_t nbFrac;
                         bool nbInRange;
                         lutLocate<scalar_t>(neighbourValue, bins, invDelta, nbBin, nbFrac, nbInRange);
-
-                        int lutIdx[4];
-                        scalar_t lutWeights[4];
-                        lutBilinearWeights<scalar_t>(bins, homeBin, homeFrac, nbBin, nbFrac, lutIdx, lutWeights);
-                        const scalar_t lutScale = g_k * spatialWeight * (neighbourValue - O_k) / W_k;
-
-#pragma unroll
-                        for(int i = 0; i < 4; i++){
-                            atomicAdd(&sGradLut[lutIdx[i]], lutScale * lutWeights[i]);
+                        
+                        if(!homePadded){
+                            int lutIdx[4];
+                            scalar_t lutWeights[4];
+                            lutBilinearWeights<scalar_t>(bins, homeBin, homeFrac, nbBin, nbFrac, lutIdx, lutWeights);
+                            const scalar_t lutScale = g_k * spatialWeight * (neighbourValue - O_k) / W_k;
+                        
+    #pragma unroll
+                            for(int i = 0; i < 4; i++){
+                                atomicAdd(&sGradLut[lutIdx[i]], lutScale * lutWeights[i]);
+                            }
                         }
 
-                        if(isCenter){
+                        if(isCenter && !homePadded){
                             valueSum += g_k * dO_dx_ki[home];
-                        } else {
+                            
+                        } else if(!isCenter && !neighbourPadded){
                             scalar_t F_adj, dFa_da, dFb_db;
                             lutSample<scalar_t>(lutTensor, bins, invDelta,
                                                 nbBin, nbFrac, nbInRange,
@@ -176,7 +189,8 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
                                          float sigma_x,
                                          float sigma_y,
                                          float sigma_z,
-                                         torch::Tensor lutTensor){
+                                         torch::Tensor lutTensor,
+                                         int pad_t){
 
 
     TensorDescription desc = TensorDescription(inputTensor);
@@ -253,6 +267,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
     cudaMemcpyToSymbol(cYDistanceSquaredBack, yDistanceSquared, sizeof(float) * windowSize_y);
     cudaMemcpyToSymbol(cZDistanceSquaredBack, zDistanceSquared, sizeof(float) * windowSize_z);
     cudaMemcpyToSymbol(cLutBinsBack, &lutBins, sizeof(int));
+    cudaMemcpyToSymbol(cPadTBack, &pad_t, sizeof(int));
 
     cuda_error_check("Cuda check before kernel call");
 
@@ -299,7 +314,8 @@ std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tens
                                                                      float sigma_x,
                                                                      float sigma_y,
                                                                      float sigma_z,
-                                                                     torch::Tensor lutTensor){
+                                                                     torch::Tensor lutTensor,
+                                                                     int pad_t){
                                 
     CHECK_CONTIGUOUS_CUDA(gradientInputTensor);
     CHECK_CONTIGUOUS_CUDA(inputTensor);
@@ -314,7 +330,7 @@ std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tens
 
 #define CASE(c, d) \
     BilateralFilterCudaBackwardFunction<c, d>(gradientInputTensor, gradientOutputTensor, gradLutTensor, inputTensor, outputTensor, outputWeightsTensor, \
-                                                dO_dx_ki, sigma_t, sigma_x, sigma_y, sigma_z, lutTensor);
+                                                dO_dx_ki, sigma_t, sigma_x, sigma_y, sigma_z, lutTensor, pad_t);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION, gradientInputTensor.size(1), gradientInputTensor.dim() - 2);
 #undef CASE
 

@@ -37,6 +37,8 @@ __constant__ float cSigma_yBack;
 __constant__ float cSigma_zBack;
 __constant__ float cColorSigma_Back;
 
+__constant__ int cPadTBack;
+
 template <typename scalar_t, int C>
 __global__ void BilateralFilterCudaKernelNDBackward(const scalar_t* __restrict__ gradientInputTensor,
                                                     scalar_t* gradientOutputTensor,
@@ -61,6 +63,9 @@ __global__ void BilateralFilterCudaKernelNDBackward(const scalar_t* __restrict__
 
     for(int kernelT = 0; kernelT < cKernelSizesBack[0]; kernelT++){
         int neighbourT = max(0, min(homeT + (kernelT - cHalfWindowSize_arrBack[0]), cSizesBack[0] - 1));
+        if(neighbourT < cPadTBack || neighbourT >= cSizesBack[0] - cPadTBack){
+            continue;
+        }
         scalar_t gaussianT = cGaussianKernel_tBack[kernelT];
 
         for(int kernelX = 0; kernelX < cKernelSizesBack[1]; kernelX++){
@@ -143,7 +148,8 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
                                          float sigma_x,
                                          float sigma_y,
                                          float sigma_z,
-                                         float colorSigma){
+                                         float colorSigma,
+                                         int pad_t){
 
 
     TensorDescription desc = TensorDescription(inputTensor);
@@ -226,6 +232,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
   cudaMemcpyToSymbol(cSigma_yBack, &sigma_y, sizeof(float));
   cudaMemcpyToSymbol(cSigma_zBack, &sigma_z, sizeof(float));
   cudaMemcpyToSymbol(cColorSigma_Back, &colorSigma, sizeof(float));
+  cudaMemcpyToSymbol(cPadTBack, &pad_t, sizeof(int));
 
   cuda_error_check("Cuda check before kernel call");
 
@@ -265,7 +272,8 @@ torch::Tensor BilateralFilterCudaBackward(torch::Tensor gradientInputTensor,
                                           float sigma_x,
                                           float sigma_y,
                                           float sigma_z,
-                                          float colorSigma){
+                                          float colorSigma,
+                                          int pad_t){
 
 
     CHECK_CONTIGUOUS_CUDA(gradientInputTensor);
@@ -278,7 +286,7 @@ torch::Tensor BilateralFilterCudaBackward(torch::Tensor gradientInputTensor,
     cuda_error_check("beginning");
 
 #define CASE(c, d) \
-    BilateralFilterCudaBackwardFunction<c, d>(gradientInputTensor, gradientOutputTensor, inputTensor, outputTensor, outputWeightsTensor, dO_dx_ki, sigma_t, sigma_x, sigma_y, sigma_z, colorSigma);
+    BilateralFilterCudaBackwardFunction<c, d>(gradientInputTensor, gradientOutputTensor, inputTensor, outputTensor, outputWeightsTensor, dO_dx_ki, sigma_t, sigma_x, sigma_y, sigma_z, colorSigma, pad_t);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION, gradientInputTensor.size(1), gradientInputTensor.dim() - 2);
 #undef CASE
     

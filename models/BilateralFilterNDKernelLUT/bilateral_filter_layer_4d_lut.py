@@ -57,7 +57,7 @@ def inverse_softplus(y: torch.Tensor, eps: float = 1e-6):
 class BilateralFilterFunction4DLutGPU(torch.autograd.Function):
 
     @staticmethod
-    def forward(ctx, input_img: torch.Tensor, kernel: torch.Tensor, lut: torch.Tensor):
+    def forward(ctx, input_img: torch.Tensor, kernel: torch.Tensor, lut: torch.Tensor, pad_t: int):
         assert input_img.dim() == 6, "Input must be shape [B, C, T, X, Y, Z]"
         assert input_img.shape[1] == 1, "Currently only one channel images are supported"
         assert kernel.dim() == 4, "Kernel must be shape [Wt, Wx, Wy, Wz]"
@@ -67,20 +67,22 @@ class BilateralFilterFunction4DLutGPU(torch.autograd.Function):
         kernel = kernel.contiguous()
         lut = lut.contiguous()
 
-        out, weights, dO_dx_ki = lib.forward_4dlut_gpu(input_img, kernel, lut)
+        out, weights, dO_dx_ki = lib.forward_4dlut_gpu(input_img, kernel, lut, pad_t)
 
         ctx.save_for_backward(input_img, kernel, lut, out, weights, dO_dx_ki)
+        ctx.pad_t = pad_t
         return out
 
     @staticmethod
     def backward(ctx, grad_output):
         input_img, kernel, lut, out, weights, dO_dx_ki = ctx.saved_tensors
+        pad_t = ctx.pad_t
         grad_output = grad_output.contiguous()
 
         grad_input, grad_kernel, grad_lut = lib.backward_4dlut_gpu(
-            grad_output, input_img, out, weights, dO_dx_ki, kernel, lut)
+            grad_output, input_img, out, weights, dO_dx_ki, kernel, lut, pad_t)
         
-        return grad_input, grad_kernel, grad_lut
+        return grad_input, grad_kernel, grad_lut, None
 
 class BilateralFilter4DLUT(torch.nn.Module):
     def __init__(self,
@@ -91,7 +93,6 @@ class BilateralFilter4DLUT(torch.nn.Module):
                  window_size_t=9,
                  symmetric_lut=True,
                  kernel_floor=1e-6,
-                 pad_t=4,
                  use_gpu=True):
 
         super().__init__()
@@ -125,7 +126,7 @@ class BilateralFilter4DLUT(torch.nn.Module):
         lut0 = gaussian_lut_2d(self.color_sigma / self.lut_max, self.lut_bins)
         self.raw_lut = torch.nn.Parameter(inverse_softplus(lut0))
 
-        self.pad_t = pad_t
+        self.pad_t = self.window_sizes[0] // 2
         self.use_gpu = use_gpu
 
     def kernel_weights(self):
@@ -163,7 +164,7 @@ class BilateralFilter4DLUT(torch.nn.Module):
         lut = self.activated_lut().to(x.dtype)
 
         if self.use_gpu:
-            output = BilateralFilterFunction4DLutGPU.apply(x, kernel, lut)
+            output = BilateralFilterFunction4DLutGPU.apply(x, kernel, lut, self.pad_t)
         else:
             raise NotImplementedError("CPU is not supported")
 

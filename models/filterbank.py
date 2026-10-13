@@ -29,8 +29,8 @@ def _nd(**kwargs):
     return BilateralFilterNd(**kwargs)
 
 def _ndlut(**kwargs):
-    from bilater_filter_layer_nd_lut import BilaterFilterNdLUT
-    return BilaterFilterNdLUT(**kwargs)
+    from bilateral_filter_layer_nd_lut import BilateralFilterNdLUT
+    return BilateralFilterNdLUT(**kwargs)
 
 STAGE_BUILDERS = {
     'spatial3d': _spatial3d,

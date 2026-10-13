@@ -1,7 +1,8 @@
 name: RedCNN2d
 train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
 parameter_dir: /home/dpietsch/4DCT/parameters
-epochs: 60
+epochs: 450
+pretrained: false
 batch_size: 1
 amp: false
 model:
@@ -11,4 +12,5 @@ model:
 optim: {lr_network: 1.0e-4}
 clamp: {}
 crop: {patch_size: [16, 64, 64], margin: [0, 20, 20], num_crops_train: 4, num_crops_validation: 8}
+validate_every: 8
 

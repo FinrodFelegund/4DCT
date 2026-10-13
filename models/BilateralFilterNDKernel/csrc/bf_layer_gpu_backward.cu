@@ -17,6 +17,8 @@ __constant__ int cHalfWindowSize_arrBack[4];
 __constant__ float cColorExponentConstantBack;
 __constant__ float cColorSigmaBack;
 
+__constant__ int cPadTBack;
+
 template <typename scalar_t, int C>
 __global__ void BilaterFilterCudaKernelLearnableSptBackward(
   const scalar_t* gradientInputTensor,
@@ -25,7 +27,7 @@ __global__ void BilaterFilterCudaKernelLearnableSptBackward(
   const scalar_t* inputTensor,
   const scalar_t* outputTensor,
   const scalar_t* outputWeightsTensor,
-  const scalar_t* d0_dx_ki,
+  const scalar_t* dO_dx_ki,
   const scalar_t* kernelTensor){
 
     int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
@@ -58,12 +60,18 @@ __global__ void BilaterFilterCudaKernelLearnableSptBackward(
     const int homeZ = (homeOffset - homeT * cStridesBack[0] - homeX * cStridesBack[1] - homeY * cStridesBack[2]) / cStridesBack[3];
     const int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
+    const bool homePadded = homeT < cPadTBack || homeT >= cSizesBack[0] - cPadTBack;
+
     scalar_t valueSum = 0;
     if(active){
 
 
       for(int kernelT = 0; kernelT < Wt; kernelT++){
         int neighbourT = max(0, min(homeT + (kernelT - halfT), cSizesBack[0] - 1));
+        const bool neighbourPadded = (homeT + kernelT - halfT) < cPadTBack || (homeT + kernelT - halfT) >= cSizesBack[0] - cPadTBack;
+        if(homePadded && neighbourPadded){
+          continue;
+        }
 
         for(int kernelX = 0; kernelX < Wx; kernelX++){
           int neighbourX = max(0, min(homeX + (kernelX - halfX), cSizesBack[1] - 1));
@@ -112,30 +120,38 @@ __global__ void BilaterFilterCudaKernelLearnableSptBackward(
               scalar_t totalWeight = kernelTensor[mirroredKernelOffset] * colorWeight;
 
               if(flagNotClamped){
+
                 scalar_t filter_kernel_back = 0;
+                const bool isCenter = kernelT == halfT && kernelX == halfX && kernelY == halfY && kernelZ == halfZ;
+
   #pragma unroll
                 for(int c = 0; c < C; c++){
-                  if(kernelT != halfT || kernelX != halfX || kernelY != halfY || kernelZ != halfZ){
-                    scalar_t W_i = outputWeightsTensor[batchOffset + neighbourOffset + c * cColorStrideBack];
-                    scalar_t O_i = outputTensor[batchOffset + neighbourOffset + c * cColorStrideBack];
-                    scalar_t x_k = inputTensor[batchOffset + homeOffset + c * cColorStrideBack];
+                    const int hm = batchOffset + homeOffset + c * cColorStrideBack;
+                    const int nb = batchOffset + neighbourOffset + c * cColorStrideBack;
 
-                    filter_kernel_back = 
-                      -(1 / W_i) * O_i * totalWeight * colorDistance / (cColorSigmaBack * cColorSigmaBack) +
-                      (1 / W_i) * totalWeight * (1 + x_k * colorDistance / (cColorSigmaBack * cColorSigmaBack));
-                  } else {
-                    filter_kernel_back = d0_dx_ki[batchOffset + homeOffset + c * cColorStrideBack];
+                  if(isCenter && !homePadded){
+
+                    valueSum += gradientInputTensor[hm] * dO_dx_ki[hm];
+
+                  } else if(!isCenter && !neighbourPadded){
+
+                    const scalar_t W_i = outputWeightsTensor[nb];
+                    const scalar_t O_i = outputTensor[nb];
+                    const scalar_t x_m = inputTensor[hm];
+                    const scalar_t g_i = gradientInputTensor[nb];
+                    const scalar_t invConstant = (scalar_t)1 / (cColorSigmaBack * cColorSigmaBack);
+                    valueSum += g_i * totalWeight * (1 + (x_m - O_i) * colorDistance * invConstant) / W_i;
+
                   }
-
-                  valueSum += gradientInputTensor[batchOffset + neighbourOffset + c * cColorStrideBack] * filter_kernel_back;
-
-                  scalar_t W_m = outputWeightsTensor[batchOffset + homeOffset + c * cColorStrideBack];
-                  scalar_t O_m = outputTensor[batchOffset + homeOffset + c * cColorStrideBack];
-                  scalar_t x_neighbour = inputTensor[batchOffset + neighbourOffset + c * cColorStrideBack];
-                  scalar_t g_m = gradientInputTensor[batchOffset + homeOffset + c * cColorStrideBack];
-
-                  scalar_t dK_contribution = g_m * (colorWeight / W_m) * (x_neighbour - O_m);
-                  atomicAdd(&sGradKernel[kernelOffset], dK_contribution);
+                  
+                  if(!homePadded){
+                    const scalar_t W_m = outputWeightsTensor[hm];
+                    const scalar_t O_m = outputTensor[hm];
+                    const scalar_t x_i = inputTensor[nb];
+                    const scalar_t g_m = gradientInputTensor[hm];
+                    atomicAdd(&sGradKernel[kernelOffset], g_m * (colorWeight / W_m) * (x_i - O_m));
+                  
+                  }
                 }
               }
             }
@@ -168,7 +184,8 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
                                        torch::Tensor outputWeightsTensor,
                                        torch::Tensor dO_dx_ki,
                                        torch::Tensor kernelTensor,
-                                       float colorSigma){
+                                       float colorSigma,
+                                       int pad_t){
   
   TensorDescription desc = TensorDescription(inputTensor);
 
@@ -191,6 +208,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
   cudaMemcpyToSymbol(cHalfWindowSize_arrBack, halfWindowSize_arr, sizeof(int) * 4);
   cudaMemcpyToSymbol(cColorExponentConstantBack, &colorExpConstant, sizeof(float));
   cudaMemcpyToSymbol(cColorSigmaBack, &colorSigma, sizeof(float));
+  cudaMemcpyToSymbol(cPadTBack, &pad_t, sizeof(int));
 
   cuda_error_check("Cuda check before kernel call");
 
@@ -221,7 +239,8 @@ std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tens
                                                                      torch::Tensor outputWeightsTensor,
                                                                      torch::Tensor dO_dx_ki,
                                                                      torch::Tensor kernelTensor,
-                                                                     float colorSigma) {
+                                                                     float colorSigma,
+                                                                     int pad_t) {
   
   CHECK_CONTIGUOUS_CUDA(gradientInputTensor);
   CHECK_CONTIGUOUS_CUDA(inputTensor);
@@ -236,7 +255,7 @@ std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tens
   BilateralFilterCudaBackwardFunction<c, d>(gradientInputTensor, gradientOutputTensor,        \
                                             gradKernelTensor, inputTensor, outputTensor,      \
                                             outputWeightsTensor, dO_dx_ki, kernelTensor,      \
-                                            colorSigma);
+                                            colorSigma, pad_t);
   SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION,
             gradientInputTensor.size(1), gradientInputTensor.dim() - 2);
 #undef CASE

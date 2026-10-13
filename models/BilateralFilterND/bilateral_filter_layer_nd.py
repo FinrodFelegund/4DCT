@@ -26,12 +26,12 @@ def unpad_circular_t(x: torch.Tensor, pad_t: int):
 
 class BilateralFilterFunctionNdGPU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_img, sigma_t, sigma_x, sigma_y, sigma_z, color_sigma):
+    def forward(ctx, input_img, sigma_t, sigma_x, sigma_y, sigma_z, color_sigma, pad_t):
         assert input_img.shape[1] == 1, 'Currently only one channel images are supported'
         assert input_img.dim() == 6, 'Input shape must be [B, C, T, H, W, D]'
 
         input_img = input_img.contiguous()
-        outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_color = bilateral_filter_layer_nd_gpu_lib.forward_gpu(input_img, float(sigma_t), float(sigma_x), float(sigma_y), float(sigma_z), float(color_sigma))
+        outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_color = bilateral_filter_layer_nd_gpu_lib.forward_gpu(input_img, float(sigma_t), float(sigma_x), float(sigma_y), float(sigma_z), float(color_sigma), int(pad_t))
 
         ctx.save_for_backward(input_img,
                               outputTensor,
@@ -41,8 +41,10 @@ class BilateralFilterFunctionNdGPU(torch.autograd.Function):
                               dO_dsig_x,
                               dO_dsig_y,
                               dO_dsig_z,
-                              dO_dsig_color)
+                              dO_dsig_color,
+                              )
         ctx.sigmas = tuple(float(s) for s in (sigma_t, sigma_x, sigma_y, sigma_z, color_sigma))
+        ctx.pad_t = int(pad_t)
 
         return outputTensor
 
@@ -52,11 +54,11 @@ class BilateralFilterFunctionNdGPU(torch.autograd.Function):
         grad_output = grad_output.contiguous()
         input_img, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_color = ctx.saved_tensors
 
-        grad_input = bilateral_filter_layer_nd_gpu_lib.backward_gpu(grad_output, input_img, outputTensor, outputWeightsTensor, dO_dx_ki, *ctx.sigmas)
+        grad_input = bilateral_filter_layer_nd_gpu_lib.backward_gpu(grad_output, input_img, outputTensor, outputWeightsTensor, dO_dx_ki, *ctx.sigmas, ctx.pad_t)
         grad_sigmas = [torch.sum(grad_output * d_s) if ctx.needs_input_grad[i + 1] else None
                        for i, d_s in enumerate((dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_color))]
 
-        return (grad_input, *grad_sigmas)
+        return (grad_input, *grad_sigmas, None)
 
 
 class BilateralFilterNd(torch.nn.Module):
@@ -109,7 +111,7 @@ class BilateralFilterNd(torch.nn.Module):
         x = pad_circular_t(x, self.pad_t)
 
         if self.use_gpu:
-            output = BilateralFilterFunctionNdGPU.apply(x, self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, self.color_sigma)
+            output = BilateralFilterFunctionNdGPU.apply(x, self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, self.color_sigma, self.pad_t)
         else:
             raise NotImplementedError('CPU is not supported')
 

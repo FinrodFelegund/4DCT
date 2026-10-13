@@ -17,6 +17,8 @@ __constant__ int cHalfWindowSize_arrBack[4];
 
 __constant__ int cLutBinsBack;
 
+__constant__ int cPadTBack;
+
 template<typename scalar_t, int C>
 __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restrict__ gradientInputTensor,
                                                      scalar_t* gradientOutputTensor,
@@ -75,6 +77,8 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
                         cStridesBack[3];
         const int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
+        const bool homePadded = homeT < cPadTBack || homeT >= cSizesBack[0] - cPadTBack;
+
         const scalar_t homeValue = inputTensor[homeOffset + batchOffset];
         int homeBin;
         scalar_t homeFrac;
@@ -83,6 +87,11 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
 
         for(int kernelT = 0; kernelT < Wt; kernelT++){
             int neighbourT = max(0, min(homeT + (kernelT - halfT), cSizesBack[0] - 1));
+            const bool neighbourPadded = (homeT + kernelT - halfT) < cPadTBack || (homeT + kernelT - halfT) >= cSizesBack[0] - cPadTBack;
+
+            if(homePadded && neighbourPadded){
+                continue;
+            }
 
             for(int kernelX = 0; kernelX < Wx; kernelX++){
                 int neighbourX = max(0, min(homeX + (kernelX - halfX), cSizesBack[1] - 1));
@@ -120,38 +129,41 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
                             int nBin;
                             scalar_t nFrac;
                             bool nInRange;
-                            lutLocate<scalar_t>(neighbourValue, bins, invDelta, nBin, nFrac, nInRange);
-
-                            //F(x_home, x_neighbour)
-                            scalar_t F_home, dFh_da, dFh_db;
-                            lutSample<scalar_t>(lutTensor, bins, invDelta,
-                                                homeBin, homeFrac, homeInRange,
-                                                nBin, nFrac, nInRange,
-                                                F_home, dFh_da, dFh_db);
                             
-                            const scalar_t W_m = outputWeightsTensor[batchOffset + homeOffset + c * cColorStrideBack];
-                            const scalar_t O_m = outputTensor[batchOffset + homeOffset + c * cColorStrideBack];
-                            const scalar_t g_m = gradientInputTensor[batchOffset + homeOffset + c * cColorStrideBack];
+                            if(!homePadded){
+                                lutLocate<scalar_t>(neighbourValue, bins, invDelta, nBin, nFrac, nInRange);
 
-                            // dL/dK_j
-                            // dO_m/dK_j = (F(x_m, x_n) / W_m) * (x_n - O_m)
-                            atomicAdd(&sGradKernel[kernelOffset], g_m * (F_home * ((neighbourValue - O_m) / W_m)));
+                                //F(x_home, x_neighbour)
+                                scalar_t F_home, dFh_da, dFh_db;
+                                lutSample<scalar_t>(lutTensor, bins, invDelta,
+                                                    homeBin, homeFrac, homeInRange,
+                                                    nBin, nFrac, nInRange,
+                                                    F_home, dFh_da, dFh_db);
+                                
+                                const scalar_t W_m = outputWeightsTensor[batchOffset + homeOffset + c * cColorStrideBack];
+                                const scalar_t O_m = outputTensor[batchOffset + homeOffset + c * cColorStrideBack];
+                                const scalar_t g_m = gradientInputTensor[batchOffset + homeOffset + c * cColorStrideBack];
 
-                            //dL/dF_pq
-                            //dO_m/dF_pq = (K_j * beta_pq / W_m) * (x_n - O_m)
-                            const scalar_t spatialWeight = kernelTensor[kernelOffset];
-                            int lutIdx[4];
-                            scalar_t lutWeights[4];
-                            lutBilinearWeights<scalar_t>(bins, homeBin, homeFrac, nBin, nFrac, lutIdx, lutWeights);
-                            
-                            const scalar_t lutScale = (g_m * (neighbourValue - O_m) / W_m) * spatialWeight;
-    #pragma unroll
-                            for(int i= 0; i < 4; i++){
-                                atomicAdd(&sGradLut[lutIdx[i]], lutScale * lutWeights[i]);
+                                // dL/dK_j
+                                // dO_m/dK_j = (F(x_m, x_n) / W_m) * (x_n - O_m)
+                                atomicAdd(&sGradKernel[kernelOffset], g_m * (F_home * ((neighbourValue - O_m) / W_m)));
+                                
+                                //dL/dF_pq
+                                //dO_m/dF_pq = (K_j * beta_pq / W_m) * (x_n - O_m)
+                                const scalar_t spatialWeight = kernelTensor[kernelOffset];
+                                int lutIdx[4];
+                                scalar_t lutWeights[4];
+                                lutBilinearWeights<scalar_t>(bins, homeBin, homeFrac, nBin, nFrac, lutIdx, lutWeights);
+                                
+                                const scalar_t lutScale = (g_m * (neighbourValue - O_m) / W_m) * spatialWeight;
+                                #pragma unroll
+                                for(int i= 0; i < 4; i++){
+                                    atomicAdd(&sGradLut[lutIdx[i]], lutScale * lutWeights[i]);
+                                }
                             }
 
                             //dL/dx_k
-                            if(!isCenter){
+                            if(!isCenter && !neighbourPadded){
                                 scalar_t F_adj, dFa_da, dFa_db;
                                 lutSample<scalar_t>(lutTensor, bins, invDelta,
                                                     nBin, nFrac, nInRange,
@@ -167,7 +179,7 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
                                 const scalar_t filter_kernel_back = (1 / W_i) * (w_ik + dw_ik_dxk * (homeValue - O_i));
 
                                 valueSum += gradientInputTensor[batchOffset + neighbourOffset + c * cColorStrideBack] * filter_kernel_back;
-                            } else {
+                            } else if(isCenter && !homePadded){
                                 valueSum += gradientInputTensor[batchOffset + homeOffset + c * cColorStrideBack] * d0_dx_ki[batchOffset + homeOffset + c * cColorStrideBack];
                             }
                         }
@@ -211,7 +223,8 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
                                        torch::Tensor outputWeightsTensor,
                                        torch::Tensor d0_dx_ki,
                                        torch::Tensor kernelTensor,
-                                       torch::Tensor lutTensor){
+                                       torch::Tensor lutTensor,
+                                       int pad_t){
 
     TensorDescription desc = TensorDescription(inputTensor);
 
@@ -233,6 +246,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
     cudaMemcpyToSymbol(cKernelSizesBack, kernelSizes, sizeof(int) * 4);
     cudaMemcpyToSymbol(cHalfWindowSize_arrBack, halfWindowSize_arr, sizeof(int) * 4);
     cudaMemcpyToSymbol(cLutBinsBack, &lutBins, sizeof(int));
+    cudaMemcpyToSymbol(cPadTBack, &pad_t, sizeof(int));
 
     cuda_error_check("Cuda check before kernel call");
 
@@ -266,7 +280,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>BilateralFilterCudaBackwa
                                                                                  torch::Tensor outputWeightsTensor,
                                                                                  torch::Tensor dO_dx_ki,
                                                                                  torch::Tensor kernelTensor,
-                                                                                 torch::Tensor lutTensor){
+                                                                                 torch::Tensor lutTensor,
+                                                                                 int pad_t){
 
     CHECK_CONTIGUOUS_CUDA(gradientInputTensor);
     CHECK_CONTIGUOUS_CUDA(inputTensor);
@@ -287,7 +302,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>BilateralFilterCudaBackwa
                                             gradKernelTensor, gradLutTensor,            \
                                             inputTensor, outputTensor,                  \
                                             outputWeightsTensor, dO_dx_ki,              \
-                                            kernelTensor, lutTensor);
+                                            kernelTensor, lutTensor, pad_t);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION,
               gradientInputTensor.size(1), gradientInputTensor.dim() - 2);
 #undef CASE

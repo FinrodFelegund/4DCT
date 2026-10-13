@@ -31,7 +31,8 @@ limitations under the License.
 //#ifdef WITH_CUDA
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> BilateralFilterCudaForward(torch::Tensor inputTensor,
                                                                                                   torch::Tensor kernelTensor,
-                                                                                                  float colorSigma);
+                                                                                                  float colorSigma,
+                                                                                                  int pad_t);
 
 std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tensor gradientInputTensor,
                                           torch::Tensor inputTensor,
@@ -39,5 +40,6 @@ std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tens
                                           torch::Tensor outputWeightsTensor,
                                           torch::Tensor dO_dx_ki,
                                           torch::Tensor kernelTensor,
-                                          float colorSigma);
+                                          float colorSigma,
+                                          int pad_t);
 //#endif

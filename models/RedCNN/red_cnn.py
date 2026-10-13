@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 class REDCNN3D(torch.nn.Module):
-    def __init__(self, phases: int = 10, channels: int = 96, kernel: Tuple = (5, 5, 3)):
+    def __init__(self, phases: int = 10, channels: int = 96, kernel: Tuple = (5, 5, 5)):
         super().__init__()
 
         self.convs = torch.nn.ModuleList([torch.nn.Conv3d(
@@ -34,12 +34,10 @@ class REDCNN3D(torch.nn.Module):
 
 
     def init_weights(self):
-        """
-        Initialisation as described in Chen et al.
-        """
         for layer in [*self.convs, *self.deconvs]:
-            torch.nn.init.normal_(layer.weight, 0.0, 0.01)
+            torch.nn.init.kaiming_normal_(layer.weight, nonlinearity='relu')
             torch.nn.init.zeros_(layer.bias)
+        torch.nn.init.zeros_(self.deconvs[-1].weight)
 
     def forward(self, x: torch.Tensor):
         """
@@ -96,6 +94,7 @@ class REDCNN2D(torch.nn.Module):
         for layer in [*self.convs, *self.deconvs]:
             torch.nn.init.normal_(layer.weight, 0, 0.01)
             torch.nn.init.zeros_(layer.bias)
+        torch.nn.init.zeros_(self.deconvs[-1].weight)
 
     def forward(self, x: torch.Tensor):
         """No final relu same reason as above"""

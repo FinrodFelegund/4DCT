@@ -32,6 +32,8 @@ __constant__ float cSigma_y;
 __constant__ float cSigma_z;
 __constant__ float cColorSigma;
 
+__constant__ int cPadT;
+
 template <typename scalar_t, int C>
 __global__ void BilateralFilterCudaKernelNDForward(const scalar_t* __restrict__ inputTensor,
                                                    scalar_t* outputTensor,
@@ -51,6 +53,16 @@ __global__ void BilateralFilterCudaKernelNDForward(const scalar_t* __restrict__ 
     }
 
     int homeT = homeOffset / cStrides[0];
+    //check if we are in the circularly padded part of the scan, if so return early
+    if(homeT < cPadT || homeT >=  cSizes[0] - cPadT){
+        for(int c = 0; c < C; c++){
+            const int idx = batchOffset + homeOffset + c * cColorStride;
+            outputTensor[idx] = inputTensor[idx];
+            outputWeightsTensor[idx] = (scalar_t)1;
+            dO_dx_ki[idx] = (scalar_t)0;
+        }
+        return;
+    }
     int homeX = (homeOffset - homeT * cStrides[0]) / cStrides[1];
     int homeY = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1]) / cStrides[2];
     int homeZ = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1] - homeY * cStrides[2]) / cStrides[3];
@@ -182,7 +194,8 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
                                         float sigma_x,
                                         float sigma_y,
                                         float sigma_z,
-                                        float colorSigma){
+                                        float colorSigma,
+                                        int pad_t){
 
     TensorDescription desc = TensorDescription(inputTensor);
     
@@ -258,6 +271,7 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
   cudaMemcpyToSymbol(cSigma_y, &sigma_y, sizeof(float));
   cudaMemcpyToSymbol(cSigma_z, &sigma_z, sizeof(float));
   cudaMemcpyToSymbol(cColorSigma, &colorSigma, sizeof(float));
+  cudaMemcpyToSymbol(cPadT, &pad_t, sizeof(int));
 
   cuda_error_check("Cuda check before kernel call");
 
@@ -298,7 +312,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
                                                                                                                                                float sigma_x,
                                                                                                                                                float sigma_y,
                                                                                                                                                float sigma_z,
-                                                                                                                                               float color_sigma){
+                                                                                                                                               float color_sigma,
+                                                                                                                                               int pad_t){
 
     CHECK_CONTIGUOUS_CUDA(inputTensor);
     TORCH_CHECK(inputTensor.dim() == 6, "inputTensor must be [B, C, T, H, W, D]");
@@ -315,7 +330,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     cuda_error_check("beginning");
 
 #define CASE(c, d) \
-    BilateralFilterCudaForwardFunction<c, d>(inputTensor, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_r, sigma_t, sigma_x, sigma_y, sigma_z, color_sigma);
+    BilateralFilterCudaForwardFunction<c, d>(inputTensor, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, dO_dsig_r, sigma_t, sigma_x, sigma_y, sigma_z, color_sigma, pad_t);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION, inputTensor.size(1), inputTensor.dim() - 2);
 #undef CASE
    

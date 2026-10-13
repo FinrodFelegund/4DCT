@@ -12,6 +12,7 @@ from torch.autograd import gradcheck
 
 SHAPE = (1, 1, 6, 5, 7, 9)
 VALUES = {'sigma_t': 1.1,'sigma_x': 1.1, 'sigma_y': 1.1, 'sigma_z': 1.1, 'color_sigma': 0.5}
+PAD = 4
 
 def sigmas(grad=None):
     return tuple(torch.tensor(v, dtype=torch.double, requires_grad=(k==grad)) for k, v in VALUES.items())
@@ -19,32 +20,32 @@ def sigmas(grad=None):
 
 def constant_input(layer_bf):
     tensor_in = torch.full(SHAPE, 0.5, dtype=torch.double, device='cuda')
-    out = layer_bf(tensor_in, *sigmas())
+    out = layer_bf(tensor_in, *sigmas(), PAD)
     print(bool(torch.isfinite(out).all()) and torch.allclose(out, tensor_in, atol=1e-6))
 
 def gradient_input(layer_bf):
     tensor_in = torch.randn(SHAPE, dtype=torch.double, device='cuda', requires_grad=True)
-    print(gradcheck(layer_bf, (tensor_in, *sigmas()), eps=1e-6, atol=1e-5))
+    print(gradcheck(layer_bf, (tensor_in, *sigmas(), PAD), eps=1e-6, atol=1e-5))
 
 
 def gradient_x(layer_bf):
     tensor_in = torch.randn(SHAPE, dtype=torch.double, device='cuda')
-    print(gradcheck(layer_bf, (tensor_in, *sigmas('sigma_x')), eps=1e-2, atol=1e-3))
+    print(gradcheck(layer_bf, (tensor_in, *sigmas('sigma_x'), PAD), eps=1e-2, atol=1e-3))
 
 
 def gradient_y(layer_bf):
     tensor_in = torch.randn(SHAPE, dtype=torch.double, device='cuda')
-    print(gradcheck(layer_bf, (tensor_in, *sigmas('sigma_y')), eps=1e-2, atol=1e-3))
+    print(gradcheck(layer_bf, (tensor_in, *sigmas('sigma_y')), PAD, eps=1e-2, atol=1e-3))
 
 
 def gradient_z(layer_bf):
     tensor_in = torch.randn(SHAPE, dtype=torch.double, device='cuda')
-    print(gradcheck(layer_bf, (tensor_in, *sigmas('sigma_z')), eps=1e-2, atol=1e-3))
+    print(gradcheck(layer_bf, (tensor_in, *sigmas('sigma_z')), PAD, eps=1e-2, atol=1e-3))
 
 
 def gradient_r(layer_bf):
     tensor_in = torch.randn(SHAPE, dtype=torch.double, device='cuda')
-    print(gradcheck(layer_bf, (tensor_in, *sigmas('color_sigma')), eps=1e-3, atol=1e-3))
+    print(gradcheck(layer_bf, (tensor_in, *sigmas('color_sigma'), PAD), eps=1e-3, atol=1e-3))
 
 
 layer_bf_gpu = BilateralFilterFunctionNdGPU.apply

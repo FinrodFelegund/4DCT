@@ -17,6 +17,8 @@ __constant__ int cHalfWindowSize_arr[4];
 
 __constant__ int cLutBins;
 
+__constant__ int cPadT;
+
 template <typename scalar_t, int C>
 __global__ void BilateralFilterCudaKernel4DLutForward(
         const scalar_t* __restrict__ input,
@@ -24,7 +26,7 @@ __global__ void BilateralFilterCudaKernel4DLutForward(
         const scalar_t* __restrict__ lutTensor,
         scalar_t* output,
         scalar_t* outputWeightsTensor,
-        scalar_t* d0_dx_ki){
+        scalar_t* dO_dx_ki){
     
     int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
     int batchOffset = blockIdx.y * cBatchStride;
@@ -46,6 +48,16 @@ __global__ void BilateralFilterCudaKernel4DLutForward(
     const scalar_t invDelta = (scalar_t)(bins - 1);
 
     const int homeT = homeOffset / cStrides[0];
+    //return early if we are in the padded region of T
+    if(homeT < cPadT || homeT >= cSizes[0] - cPadT){
+        for(int c = 0; c < C; c++){
+            const int idx = batchOffset + homeOffset + c * cColorStride;
+            output[idx] = input[idx];
+            outputWeightsTensor[idx] = (scalar_t)1;
+            dO_dx_ki[idx] = (scalar_t)0;
+        }
+        return;
+    }
     const int homeX = (homeOffset - homeT * cStrides[0]) / cStrides[1];
     const int homeY = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1]) / cStrides[2];
     const int homeZ =
@@ -138,7 +150,7 @@ __global__ void BilateralFilterCudaKernel4DLutForward(
 
         output[batchOffset + homeOffset + c * cColorStride] = out;
         outputWeightsTensor[batchOffset + homeOffset + c * cColorStride] = safeWeightSum;
-        d0_dx_ki[batchOffset + homeOffset + c * cColorStride] = (1 / safeWeightSum) * (dV_dxk + centerWeight - out * dW_dxk);
+        dO_dx_ki[batchOffset + homeOffset + c * cColorStride] = (1 / safeWeightSum) * (dV_dxk + centerWeight - out * dW_dxk);
     }
 }
 
@@ -148,7 +160,8 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
                                         torch::Tensor lutTensor,
                                         torch::Tensor outputTensor,
                                         torch::Tensor outputWeightsTensor,
-                                        torch::Tensor dO_dx_ki){
+                                        torch::Tensor dO_dx_ki,
+                                        int pad_t){
 
     TensorDescription desc = TensorDescription(inputTensor);
     int kernelSizes[4];
@@ -167,6 +180,7 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
     cudaMemcpyToSymbol(cKernelSizes, kernelSizes, sizeof(int) * 4);
     cudaMemcpyToSymbol(cHalfWindowSize_arr, halfWindowSize_arr, sizeof(int) * 4);
     cudaMemcpyToSymbol(cLutBins, &lutBins, sizeof(int));
+    cudaMemcpyToSymbol(cPadT, &pad_t, sizeof(int));
 
     cuda_error_check("Cuda check before kernel call.");
 
@@ -188,8 +202,9 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>BilateralFilterCudaForward(torch::Tensor inputTensor,
-                                                                                torch::Tensor kernelTensor,
-                                                                                torch::Tensor lutTensor){
+                                                                                  torch::Tensor kernelTensor,
+                                                                                  torch::Tensor lutTensor,
+                                                                                  int pad_t){
 
     CHECK_CONTIGUOUS_CUDA(inputTensor);
     CHECK_CONTIGUOUS_CUDA(kernelTensor);
@@ -213,7 +228,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>BilateralFilterCudaForwar
 
 #define CASE(c, d)                                                                          \
     BilateralFilterCudaForwardFunction<c, d>(inputTensor, kernelTensor, lutTensor,          \
-                                             outputTensor, outputWeightsTensor, dO_dx_ki);
+                                             outputTensor, outputWeightsTensor, dO_dx_ki, pad_t);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION, inputTensor.size(1), inputTensor.dim() - 2);
 #undef CASE
 

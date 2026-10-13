@@ -88,6 +88,20 @@ def clamp_parameters(model: torch.nn.Module, config: Dict):
         elif group == 'skip':
             continue
 
+def from_checkpoint(model, config, device):
+    if config.get('pretrained', False):
+        model_name = config.get('name')
+        param_dir = config.get('parameters')
+        ckpt_files = os.listdir(param_dir)
+        ckpt = None
+        for file in ckpt_files:
+            if file.startswith(model_name):
+                ckpt = os.path.join(param_dir, file)
+
+        if ckpt is not None:
+            weights = torch.load(ckpt, map_location=device)
+            model.load_state_dict(weights['model'])
+
 def preview_grid(model, validation_dataset, device, crop=192):
     """Centre slice of ground truth, prediction and input, side by side."""
     clean, noisy = validation_dataset.get_whole_slice()
@@ -166,10 +180,11 @@ def train(config: Dict):
     
     device = torch.device('cuda')
     model_cfg = config.get('model')
-    if isinstance(model_cfg, dict):
-        model = CNN(model_cfg['stages']).to(device)
-    else:
-        model = FilterBank(model_cfg['stages']).to(device)
+    #if isinstance(model_cfg, dict):
+    #    model = CNN(model_cfg['stages']).to(device)
+    #else:
+    model = FilterBank(model_cfg['stages']).to(device)
+    from_checkpoint(model, config, device)
     print(model)
 
     transform_params = config.get('crop')

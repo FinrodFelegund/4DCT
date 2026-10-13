@@ -53,7 +53,7 @@ def default_window_sizes(sigma_t, sigma_x, sigma_y, sigma_z, window_size_t=9):
 
 class BilateralFilterFunction4dlearnablesptGPU(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, input_img: torch.Tensor, kernel: torch.Tensor, color_sigma):
+    def forward(ctx, input_img: torch.Tensor, kernel: torch.Tensor, color_sigma: float, pad_t: int):
         assert input_img.dim() == 6, 'Input shape must be [B, C, T, H, W, D]'
         assert input_img.shape[1] == 1, 'Currently only 1 channel scans are supported'
         assert kernel.dim() == 4, 'Kernel shape must be [T, H, W, D]'
@@ -61,7 +61,7 @@ class BilateralFilterFunction4dlearnablesptGPU(torch.autograd.Function):
         input_img = input_img.contiguous()
         kernel = kernel.contiguous()
 
-        outputTensor, outputWeightsTensor, d0_dx_ki, d0_dsig_r = bilateralfilter4dlearnablespt_gpu_lib.forward_4dlearnablespt_gpu(input_img, kernel, color_sigma)
+        outputTensor, outputWeightsTensor, d0_dx_ki, d0_dsig_r = bilateralfilter4dlearnablespt_gpu_lib.forward_4dlearnablespt_gpu(input_img, kernel, color_sigma, pad_t)
 
         ctx.save_for_backward(
             input_img,
@@ -73,12 +73,15 @@ class BilateralFilterFunction4dlearnablesptGPU(torch.autograd.Function):
             d0_dsig_r,
         )
 
+        ctx.pad_t = pad_t
+
         return outputTensor
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
         grad_output = grad_output.contiguous()
         input_img, kernel, color_sigma, outputTensor, outputWeightsTensor, d0_dx_ki, d0_dsig_r = ctx.saved_tensors
+        pad_t = ctx.pad_t
 
         grad_input, grad_kernel = bilateralfilter4dlearnablespt_gpu_lib.backward_4dlearnablespt_gpu(grad_output,
                                                                                                     input_img,
@@ -86,16 +89,16 @@ class BilateralFilterFunction4dlearnablesptGPU(torch.autograd.Function):
                                                                                                     outputWeightsTensor,
                                                                                                     d0_dx_ki,
                                                                                                     kernel,
-                                                                                                    color_sigma)
+                                                                                                    color_sigma,
+                                                                                                    pad_t)
         grad_color_sigma = torch.sum(grad_output * d0_dsig_r)
-        return grad_input, grad_kernel, grad_color_sigma
+        return grad_input, grad_kernel, grad_color_sigma, None
 
 
 class BilateralFilter4dlearnablespt(nn.Module):
     def __init__(self, sigma_x, sigma_y, sigma_z, sigma_t, color_sigma, 
                  window_sizes=None,
                  window_size_t=9,
-                 pad_t=4,
                  kernel_floor=1e-6,
                  use_gpu=True):
 
@@ -115,7 +118,7 @@ class BilateralFilter4dlearnablespt(nn.Module):
         self.log_kernel = nn.Parameter(torch.log(kernel + float(kernel_floor)))
 
         self.color_sigma = nn.Parameter(torch.tensor(float(color_sigma)), requires_grad=True)
-        self.pad_t = pad_t
+        self.pad_t = self.window_sizes[0] // 2
 
         self.sigma_t = sigma_t
         self.sigma_x = sigma_x
@@ -159,7 +162,8 @@ class BilateralFilter4dlearnablespt(nn.Module):
         if self.use_gpu:
             output = BilateralFilterFunction4dlearnablesptGPU.apply(input_tensor,
                                                                     kernel,
-                                                                    color_sigma)
+                                                                    color_sigma,
+                                                                    self.pad_t)
         else:
             raise RuntimeError('CPU is not supported')
 

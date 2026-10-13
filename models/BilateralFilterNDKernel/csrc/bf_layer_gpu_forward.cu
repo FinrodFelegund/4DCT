@@ -34,14 +34,16 @@ __constant__ int cHalfWindowSize_arr[4];
 __constant__ float cColorExponentConstant;
 __constant__ float cColorSigma;
 
+__constant__ int cPadT;
+
 template <typename scalar_t, int C>
 __global__ void BilaterFilterCudaKernelLearnableSptForward(
     const scalar_t* input,
     const scalar_t* kernelTensor,
     scalar_t* output,
     scalar_t* outputWeightsTensor,
-    scalar_t* d0_dx_ki,
-    scalar_t* d0_dsig_r) {
+    scalar_t* dO_dx_ki,
+    scalar_t* dO_dsig_r) {
   
   int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
   int batchOffset = blockIdx.y * cBatchStride;
@@ -61,6 +63,16 @@ __global__ void BilaterFilterCudaKernelLearnableSptForward(
   const int halfZ = cHalfWindowSize_arr[3];
 
   const int homeT = homeOffset / cStrides[0];
+  //early return if homevoxel is inside the padded area
+  if(homeT < cPadT || homeT >= cSizes[0] - cPadT){
+    for(int c = 0; c < C; c++){
+      const int idx = batchOffset + homeOffset + c * cColorStride;
+      output[idx] = input[idx];
+      outputWeightsTensor[idx] = (scalar_t)1;
+      dO_dx_ki[idx] = (scalar_t)0;
+    }
+    return;
+  }
   const int homeX = (homeOffset - homeT * cStrides[0]) / cStrides[1];
   const int homeY = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1]) / cStrides[2];
   const int homeZ = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1] - homeY * cStrides[2]) / cStrides[3];
@@ -150,8 +162,8 @@ __global__ void BilaterFilterCudaKernelLearnableSptForward(
     output[batchOffset + homeOffset + c * cColorStride] = valueSum / safeWeightSum;
     outputWeightsTensor[batchOffset + homeOffset + c * cColorStride] = safeWeightSum;
 
-    d0_dx_ki[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * dw_dx_ki + (1 / safeWeightSum) * (dfilter_dx_ki + centerK);
-    d0_dsig_r[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * colorSum_w + (1 / safeWeightSum) * colorSum_alpha;
+    dO_dx_ki[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * dw_dx_ki + (1 / safeWeightSum) * (dfilter_dx_ki + centerK);
+    dO_dsig_r[batchOffset + homeOffset + c * cColorStride] = -(1 / safeWeightSum) * (valueSum / safeWeightSum) * colorSum_w + (1 / safeWeightSum) * colorSum_alpha;
   }
 }
 
@@ -160,9 +172,10 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
                                         torch::Tensor kernelTensor,
                                         torch::Tensor outputTensor,
                                         torch::Tensor outputWeightsTensor,
-                                        torch::Tensor d0_dx_ki,
-                                        torch::Tensor d0_dsig_r,
-                                        float colorSigma) {
+                                        torch::Tensor dO_dx_ki,
+                                        torch::Tensor dO_dsig_r,
+                                        float colorSigma,
+                                        int pad_t) {
                   
   TensorDescription desc = TensorDescription(inputTensor);
 
@@ -183,6 +196,7 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
   cudaMemcpyToSymbol(cHalfWindowSize_arr, halfWindowSize_arr, sizeof(int) * 4);
   cudaMemcpyToSymbol(cColorExponentConstant, &colorExpConstant, sizeof(float));
   cudaMemcpyToSymbol(cColorSigma, &colorSigma, sizeof(float));
+  cudaMemcpyToSymbol(cPadT, &pad_t, sizeof(int));
 
   cuda_error_check("Cuda check before kernel call");
 
@@ -195,8 +209,8 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
                                     kernelTensor.data_ptr<scalar_t>(),
                                     outputTensor.data_ptr<scalar_t>(),
                                     outputWeightsTensor.data_ptr<scalar_t>(),
-                                    d0_dx_ki.data_ptr<scalar_t>(),
-                                    d0_dsig_r.data_ptr<scalar_t>());
+                                    dO_dx_ki.data_ptr<scalar_t>(),
+                                    dO_dsig_r.data_ptr<scalar_t>());
       }
     ));
 
@@ -204,7 +218,7 @@ void BilateralFilterCudaForwardFunction(torch::Tensor inputTensor,
 }
 
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> BilateralFilterCudaForward(torch::Tensor inputTensor, torch::Tensor kernelTensor, float colorSigma){
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> BilateralFilterCudaForward(torch::Tensor inputTensor, torch::Tensor kernelTensor, float colorSigma, int pad_t){
   CHECK_CONTIGUOUS_CUDA(inputTensor);
   CHECK_CONTIGUOUS_CUDA(kernelTensor);
   CHECK_SAME_DTYPE(inputTensor, kernelTensor);
@@ -216,16 +230,16 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor> Bilateral
 
   torch::Tensor outputTensor = torch::zeros_like(inputTensor);
   torch::Tensor outputWeightsTensor = torch::zeros_like(inputTensor);
-  torch::Tensor d0_dx_ki = torch::zeros_like(inputTensor);
-  torch::Tensor d0_dsig_r = torch::zeros_like(inputTensor);
+  torch::Tensor dO_dx_ki = torch::zeros_like(inputTensor);
+  torch::Tensor dO_dsig_r = torch::zeros_like(inputTensor);
 
   cuda_error_check("beginning");
 
 #define CASE(c, d)                                                                                                                            \
-  BilateralFilterCudaForwardFunction<c, d>(inputTensor, kernelTensor, outputTensor, outputWeightsTensor, d0_dx_ki, d0_dsig_r, colorSigma);
+  BilateralFilterCudaForwardFunction<c, d>(inputTensor, kernelTensor, outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_r, colorSigma, pad_t);
   SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSION, inputTensor.size(1), inputTensor.dim() - 2)
 #undef CASE
 
-  return {outputTensor, outputWeightsTensor, d0_dx_ki, d0_dsig_r};
+  return {outputTensor, outputWeightsTensor, dO_dx_ki, dO_dsig_r};
 }
 
