@@ -7,9 +7,9 @@ model:
     - type: nd
       count: 4
       params: [
-        {axes: ['xyz'], sigma_t: 0.0, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01},
-        {axes: ['xyz'], sigma_t: 0.0, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01},
-        {axes: ['xyz'], sigma_t: 0.0, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01},
+        {axes: ['x', 'y', 'z'], sigma_t: 0.0, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01},
+        {axes: ['x', 'y', 'z'], sigma_t: 0.0, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01},
+        {axes: ['x', 'y', 'z'], sigma_t: 0.0, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, color_sigma: 0.01},
         {axes: ['t'],   sigma_t: 0.5, sigma_x: 0.0, sigma_y: 0.0, sigma_z: 0.0, color_sigma: 0.01}
       ]
 

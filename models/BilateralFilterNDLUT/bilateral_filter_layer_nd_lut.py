@@ -38,7 +38,7 @@ def inverse_softplus(y: torch.Tensor, eps: float = 1e-6):
 
 
 
-class BilaterFilterFunctionNdLUTGPU(torch.autograd.Function):
+class BilateralFilterFunctionNdLUTGPU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, input_img: torch.Tensor, sigma_t: torch.nn.Parameter, sigma_x: torch.nn.Parameter, sigma_y: torch.nn.Parameter, sigma_z: torch.nn.Parameter, lut: torch.Tensor, pad_t: int):
         assert input_img.shape[1] == 1, 'Currently only one channel images are supported'
@@ -115,6 +115,7 @@ class BilateralFilterNdLUT(torch.nn.Module):
     def parameter_groups(self, lr):
         spatial = [getattr(self, f'sigma_{a}') for a in 'xyz' if isinstance(getattr(self, f'sigma_{a}'), torch.nn.Parameter)]
         temporal = [self.sigma_t] if isinstance(self.sigma_t, torch.nn.Parameter) else []
+
         return [
             {'name': 'spatial', 'params': spatial, 'lr': lr['spatial'], 'weight_decay': 0.0},
             {'name': 'temporal', 'params': temporal, 'lr': lr['temporal'], 'weight_decay': 0.0},
@@ -125,7 +126,7 @@ class BilateralFilterNdLUT(torch.nn.Module):
         return self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, self.color_sigma
 
     def forward(self, x: torch.Tensor):
-        assert x.dim() == 6, 'Input must be shape [B, C, T, H, W, D]'
+        assert x.dim() == 6, 'Input must be shape [B, C, T, D, H, W]'
         assert x.shape[1] == 1, 'Currently only 1 channel immages are supported'
 
         x = x.permute(0, 1, 2, 4, 5, 3).contiguous() / self.lut_max
@@ -133,7 +134,7 @@ class BilateralFilterNdLUT(torch.nn.Module):
         lut = self.activated_lut().to(x.dtype)
 
         if self.use_gpu:
-            output = BilaterFilterFunctionNdLUTGPU.apply(x, self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, lut, self.pad_t)
+            output = BilateralFilterFunctionNdLUTGPU.apply(x, self.sigma_t, self.sigma_x, self.sigma_y, self.sigma_z, lut, self.pad_t)
         else:
             raise NotImplementedError('CPU is not supported')
         

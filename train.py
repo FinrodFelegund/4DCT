@@ -49,7 +49,8 @@ def learning_rates(config):
         'center': optim_cfg.get('lr_center', 0.01),
         'kernel': optim_cfg.get('lr_kernel', 1e-3),
         'lut': optim_cfg.get('lr_lut', 1e-3),
-        'network': optim_cfg.get('lr_network', 1e-4)
+        'network': optim_cfg.get('lr_network', 1e-4),
+        'embedding': optim_cfg.get('lr_embedding', 1e-3)
     }
 
 def build_optimizer(model, config):
@@ -76,6 +77,8 @@ def clamp_parameters(model: torch.nn.Module, config: Dict):
     for name, param in model.named_parameters():
         if name.rsplit('.', 1)[-1].startswith('log_'):
             continue
+        if '.range_net.' in f'.{name}':
+            continue
         group = group_of(name)
         if group == 'range':
             param.clamp_(min=range_min, max=range_max)
@@ -91,16 +94,18 @@ def clamp_parameters(model: torch.nn.Module, config: Dict):
 def from_checkpoint(model, config, device):
     if config.get('pretrained', False):
         model_name = config.get('name')
-        param_dir = config.get('parameters')
+        param_dir = config.get('parameter_dir')
         ckpt_files = os.listdir(param_dir)
         ckpt = None
         for file in ckpt_files:
             if file.startswith(model_name):
                 ckpt = os.path.join(param_dir, file)
+                
 
         if ckpt is not None:
             weights = torch.load(ckpt, map_location=device)
             model.load_state_dict(weights['model'])
+            print('loaded pretrained model from: ', ckpt)
 
 def preview_grid(model, validation_dataset, device, crop=192):
     """Centre slice of ground truth, prediction and input, side by side."""
@@ -207,7 +212,7 @@ def train(config: Dict):
                                   num_workers=config.get('num_workers', 4),
                                   collate_fn=CTTrainDataset.collate_fn)
     validation_dataloader = DataLoader(validation_dataset, batch_size=batch_size, shuffle=False,
-                                       num_workers=1, collate_fn=CTValidationDataset.collate_fn)
+                                       num_workers=2, collate_fn=CTValidationDataset.collate_fn)
 
 
     optimizer = build_optimizer(model, config)

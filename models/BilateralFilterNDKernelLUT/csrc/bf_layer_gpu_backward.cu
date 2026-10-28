@@ -19,6 +19,15 @@ __constant__ int cLutBinsBack;
 
 __constant__ int cPadTBack;
 
+template<typename scalar_t>
+__device__ __forceinline__ scalar_t warpReduceSum(scalar_t v){
+#pragma unroll
+    for(int offset = 16; offset > 0; offset >>= 1){
+        v += __shfl_down_sync(0xffffffff, v, offset);
+    }
+    return v;
+}
+
 template<typename scalar_t, int C>
 __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restrict__ gradientInputTensor,
                                                      scalar_t* gradientOutputTensor,
@@ -54,84 +63,89 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
     }
     __syncthreads();
 
-    const int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
+        const int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
     const int batchOffset = blockIdx.y * cBatchStrideBack;
 
     const bool active = homeOffset < cColorStrideBack;
+    // inactive lanes read valid memory and contribute zero, but they must take part in the warp shuffles
+    const int homeOffsetSafe = active ? homeOffset : 0;
+    const int lane = threadIdx.x & 31;
+
+    const int halfT = cHalfWindowSize_arrBack[0];
+    const int halfX = cHalfWindowSize_arrBack[1];
+    const int halfY = cHalfWindowSize_arrBack[2];
+    const int halfZ = cHalfWindowSize_arrBack[3];
+
+    const int homeT = homeOffsetSafe / cStridesBack[0];
+    const int homeX = (homeOffsetSafe - homeT * cStridesBack[0]) / cStridesBack[1];
+    const int homeY =
+        (homeOffsetSafe - homeT * cStridesBack[0] - homeX * cStridesBack[1]) / cStridesBack[2];
+    const int homeZ = (homeOffsetSafe - homeT * cStridesBack[0] - homeX * cStridesBack[1] -
+                    homeY * cStridesBack[2]) /
+                    cStridesBack[3];
+    const int homeIndex[] = {homeT, homeX, homeY, homeZ};
+
+    const bool homePadded = homeT < cPadTBack || homeT >= cSizesBack[0] - cPadTBack;
+
+    const scalar_t homeValue = inputTensor[homeOffsetSafe + batchOffset];
+    int homeBin;
+    scalar_t homeFrac;
+    bool homeInRange;
+    lutLocate<scalar_t>(homeValue, bins, invDelta, homeBin, homeFrac, homeInRange);
 
     scalar_t valueSum = 0;
-    if(active){
 
+    for(int kernelT = 0; kernelT < Wt; kernelT++){
+        int neighbourT = max(0, min(homeT + (kernelT - halfT), cSizesBack[0] - 1));
+        const bool neighbourPadded = (homeT + kernelT - halfT) < cPadTBack || (homeT + kernelT - halfT) >= cSizesBack[0] - cPadTBack;
 
-        const int halfT = cHalfWindowSize_arrBack[0];
-        const int halfX = cHalfWindowSize_arrBack[1];
-        const int halfY = cHalfWindowSize_arrBack[2];
-        const int halfZ = cHalfWindowSize_arrBack[3];
+        const bool skipT = !active || (homePadded && neighbourPadded);
+        // skip only if the whole warp agrees, so the loop stays warp-uniform for the shuffles below
+        if(__all_sync(0xffffffff, skipT)){
+            continue;
+        }
 
-        const int homeT = homeOffset / cStridesBack[0];
-        const int homeX = (homeOffset - homeT * cStridesBack[0]) / cStridesBack[1];
-        const int homeY =
-            (homeOffset - homeT * cStridesBack[0] - homeX * cStridesBack[1]) / cStridesBack[2];
-        const int homeZ = (homeOffset - homeT * cStridesBack[0] - homeX * cStridesBack[1] -
-                        homeY * cStridesBack[2]) /
-                        cStridesBack[3];
-        const int homeIndex[] = {homeT, homeX, homeY, homeZ};
+        for(int kernelX = 0; kernelX < Wx; kernelX++){
+            int neighbourX = max(0, min(homeX + (kernelX - halfX), cSizesBack[1] - 1));
 
-        const bool homePadded = homeT < cPadTBack || homeT >= cSizesBack[0] - cPadTBack;
+            for(int kernelY = 0; kernelY < Wy; kernelY++){
+                int neighbourY = max(0, min(homeY + (kernelY - halfY), cSizesBack[2] - 1));
 
-        const scalar_t homeValue = inputTensor[homeOffset + batchOffset];
-        int homeBin;
-        scalar_t homeFrac;
-        bool homeInRange;
-        lutLocate<scalar_t>(homeValue, bins, invDelta, homeBin, homeFrac, homeInRange);
+                for(int kernelZ = 0; kernelZ < Wz; kernelZ++){
+                    int neighbourZ = max(0, min(homeZ + (kernelZ - halfZ), cSizesBack[3] - 1));
 
-        for(int kernelT = 0; kernelT < Wt; kernelT++){
-            int neighbourT = max(0, min(homeT + (kernelT - halfT), cSizesBack[0] - 1));
-            const bool neighbourPadded = (homeT + kernelT - halfT) < cPadTBack || (homeT + kernelT - halfT) >= cSizesBack[0] - cPadTBack;
+                    int neighbourOffset = neighbourT * cStridesBack[0] + neighbourX * cStridesBack[1] + neighbourY * cStridesBack[2] + neighbourZ;
 
-            if(homePadded && neighbourPadded){
-                continue;
-            }
-
-            for(int kernelX = 0; kernelX < Wx; kernelX++){
-                int neighbourX = max(0, min(homeX + (kernelX - halfX), cSizesBack[1] - 1));
-
-                for(int kernelY = 0; kernelY < Wy; kernelY++){
-                    int neighbourY = max(0, min(homeY + (kernelY - halfY), cSizesBack[2] - 1));
-
-                    for(int kernelZ = 0; kernelZ < Wz; kernelZ++){
-                        int neighbourZ = max(0, min(homeZ + (kernelZ - halfZ), cSizesBack[3] - 1));
-                        
-                        int neighbourOffset = neighbourT * cStridesBack[0] + neighbourX * cStridesBack[1] + neighbourY * cStridesBack[2] + neighbourZ;
-
-                        bool flagNotClamped = true;
-                        int kernelIndex[] = {kernelT, kernelX, kernelY, kernelZ};
-                        for(int i = 0; i < 4; i++){
-                            int HalfWindowSize = cHalfWindowSize_arrBack[i];
-                            int neighbourIndex = homeIndex[i] + kernelIndex[i] - HalfWindowSize;
-                            int neighbourIndexClamped = min(cSizesBack[i] - 1, max(0, neighbourIndex));
-                            if(neighbourIndex != neighbourIndexClamped){
-                                flagNotClamped = false;
-                            }
+                    bool flagNotClamped = true;
+                    int kernelIndex[] = {kernelT, kernelX, kernelY, kernelZ};
+                    for(int i = 0; i < 4; i++){
+                        int HalfWindowSize = cHalfWindowSize_arrBack[i];
+                        int neighbourIndex = homeIndex[i] + kernelIndex[i] - HalfWindowSize;
+                        int neighbourIndexClamped = min(cSizesBack[i] - 1, max(0, neighbourIndex));
+                        if(neighbourIndex != neighbourIndexClamped){
+                            flagNotClamped = false;
                         }
+                    }
 
-                        if(!flagNotClamped){
-                            continue;
-                        }
+                    // replaces both per-thread 'continue's
+                    const bool valid = !skipT && flagNotClamped;
 
-                        const bool isCenter = (kernelT == halfT) && (kernelX == halfX) && (kernelY == halfY) && (kernelZ == halfZ);
-                        const int kernelOffset = ((kernelT * Wx + kernelX) * Wy + kernelY) * Wz + kernelZ;
-                        const int mirroredKernelOffset = (((2 * halfT - kernelT) * Wx + (2 * halfX - kernelX)) * Wy + (2 * halfY - kernelY)) * Wz + (2 * halfZ - kernelZ);
+                    const bool isCenter = (kernelT == halfT) && (kernelX == halfX) && (kernelY == halfY) && (kernelZ == halfZ);
+                    const int kernelOffset = ((kernelT * Wx + kernelX) * Wy + kernelY) * Wz + kernelZ;
+                    const int mirroredKernelOffset = (((2 * halfT - kernelT) * Wx + (2 * halfX - kernelX)) * Wy + (2 * halfY - kernelY)) * Wz + (2 * halfZ - kernelZ);
 
-    #pragma unroll
+                    scalar_t kernelGrad = 0;
+
+                    if(valid){
+#pragma unroll
                         for(int c = 0; c < C; c++){
                             const scalar_t neighbourValue = inputTensor[batchOffset + neighbourOffset + c * cColorStrideBack];
                             int nBin;
                             scalar_t nFrac;
                             bool nInRange;
-                            
+                            lutLocate<scalar_t>(neighbourValue, bins, invDelta, nBin, nFrac, nInRange);
+
                             if(!homePadded){
-                                lutLocate<scalar_t>(neighbourValue, bins, invDelta, nBin, nFrac, nInRange);
 
                                 //F(x_home, x_neighbour)
                                 scalar_t F_home, dFh_da, dFh_db;
@@ -139,25 +153,25 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
                                                     homeBin, homeFrac, homeInRange,
                                                     nBin, nFrac, nInRange,
                                                     F_home, dFh_da, dFh_db);
-                                
-                                const scalar_t W_m = outputWeightsTensor[batchOffset + homeOffset + c * cColorStrideBack];
-                                const scalar_t O_m = outputTensor[batchOffset + homeOffset + c * cColorStrideBack];
-                                const scalar_t g_m = gradientInputTensor[batchOffset + homeOffset + c * cColorStrideBack];
 
-                                // dL/dK_j
+                                const scalar_t W_m = outputWeightsTensor[batchOffset + homeOffsetSafe + c * cColorStrideBack];
+                                const scalar_t O_m = outputTensor[batchOffset + homeOffsetSafe + c * cColorStrideBack];
+                                const scalar_t g_m = gradientInputTensor[batchOffset + homeOffsetSafe + c * cColorStrideBack];
+
+                                // dL/dK_j, accumulated in a register, reduced over the warp below
                                 // dO_m/dK_j = (F(x_m, x_n) / W_m) * (x_n - O_m)
-                                atomicAdd(&sGradKernel[kernelOffset], g_m * (F_home * ((neighbourValue - O_m) / W_m)));
-                                
+                                kernelGrad += g_m * (F_home * ((neighbourValue - O_m) / W_m));
+
                                 //dL/dF_pq
                                 //dO_m/dF_pq = (K_j * beta_pq / W_m) * (x_n - O_m)
                                 const scalar_t spatialWeight = kernelTensor[kernelOffset];
                                 int lutIdx[4];
                                 scalar_t lutWeights[4];
                                 lutBilinearWeights<scalar_t>(bins, homeBin, homeFrac, nBin, nFrac, lutIdx, lutWeights);
-                                
+
                                 const scalar_t lutScale = (g_m * (neighbourValue - O_m) / W_m) * spatialWeight;
-                                #pragma unroll
-                                for(int i= 0; i < 4; i++){
+#pragma unroll
+                                for(int i = 0; i < 4; i++){
                                     atomicAdd(&sGradLut[lutIdx[i]], lutScale * lutWeights[i]);
                                 }
                             }
@@ -180,14 +194,21 @@ __global__ void BilateralFilterCudaKernel4DLutBackward(const scalar_t* __restric
 
                                 valueSum += gradientInputTensor[batchOffset + neighbourOffset + c * cColorStrideBack] * filter_kernel_back;
                             } else if(isCenter && !homePadded){
-                                valueSum += gradientInputTensor[batchOffset + homeOffset + c * cColorStrideBack] * d0_dx_ki[batchOffset + homeOffset + c * cColorStrideBack];
+                                valueSum += gradientInputTensor[batchOffset + homeOffsetSafe + c * cColorStrideBack] * d0_dx_ki[batchOffset + homeOffsetSafe + c * cColorStrideBack];
                             }
                         }
+                    }
+
+                    // all 32 lanes arrive here: one shared atomic per warp instead of 32 conflicting ones
+                    kernelGrad = warpReduceSum<scalar_t>(kernelGrad);
+                    if(lane == 0 && kernelGrad != (scalar_t)0){
+                        atomicAdd(&sGradKernel[kernelOffset], kernelGrad);
                     }
                 }
             }
         }
     }
+
     __syncthreads();
     for(int i = threadIdx.x; i < bins * bins; i += blockDim.x){
         scalar_t v = sGradLut[i];
@@ -250,7 +271,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor,
 
     cuda_error_check("Cuda check before kernel call");
 
-    const int blockSize = 128;
+    const int blockSize = 256;
 
     AT_DISPATCH_FLOATING_TYPES(
         inputTensor.scalar_type(), "BilateralFilterCudaKernel4DLutBackward", ([&] {

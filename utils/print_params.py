@@ -21,7 +21,13 @@ def print_params():
                 print(name)
                 print('(normalised to sum 1)')
                 print(k / k.sum())
+            elif n.startswith('lut'):
+                continue
+            elif n.startswith('weight'):
+                continue
+            elif n.startswith('bias'):
+                continue
             else:
-                print(name, param)
+                print(name, '---', param)
 
 print_params()

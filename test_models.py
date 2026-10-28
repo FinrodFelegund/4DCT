@@ -10,11 +10,12 @@ from PIL import Image
 from torchmetrics.functional.image import peak_signal_noise_ratio as psnr_fn
 from torchmetrics.functional.image import structural_similarity_index_measure as ssim_fn
 from tqdm import tqdm
-from matplotlib.colors import TwoSlopeNorm
+from matplotlib.colors import LogNorm, TwoSlopeNorm
 import matplotlib.pyplot as plt
 
 from data.dataset import CTValidationDataset
 from models.filterbank import FilterBank
+from models.cnn import CNN
 from utils.processing import interior, inplane_interior, body_box
 from utils.rois import AORTA_ROI
 
@@ -34,7 +35,9 @@ LUNG_HI = LUNG_CENTER + (LUNG_WIDTH / 2)
 
 PHASE_INDEX = 5
 CROP_DY, CROP_DX = 110, 120
-MARGIN = 8
+DEFAULT_MARGIN = (8, 8, 8)
+QUAL_MARGIN = (8, 8, 8,)
+MARGIN = DEFAULT_MARGIN
 MOTION_QUANTILE = 0.9
 
 MODELS = {
@@ -59,17 +62,22 @@ MODELS = {
         'config': '/home/dpietsch/4DCT/configs/LearnableFilter4D.yml',
     },
     'LearnableFilterSPT4D': {
-        'parameters': '/home/dpietsch/4DCT/parameters/LearnableFilterSPT4D_epoch29_loss0.000053.pth',
+        'parameters': '',
         'config': '/home/dpietsch/4DCT/configs/LearnableFilterSPT4D.yml',
     },
     'LearnableFilter4DLUT': {
-        'parameters': '/home/dpietsch/4DCT/parameters/LearnableFilter4DLUT_epoch29_loss0.000048.pth',
+        'parameters': '/home/dpietsch/4DCT/parameters/LearnableFilter4DLUT_epoch193_loss0.000043.pth',
         'config': '/home/dpietsch/4DCT/configs/LearnableFilter4DLUT.yml',
     },
     'LearnableFilterSPT4DLUT': {
-        'parameters': '/home/dpietsch/4DCT/parameters/LearnableFilterSPT4DLUT_epoch29_loss0.000042.pth',
+        'parameters': '/home/dpietsch/4DCT/parameters/LearnableFilterSPT4DLUT_epoch200_loss0.000035.pth',
         'config': '/home/dpietsch/4DCT/configs/LearnableFilterSPT4DLUT.yml',
-    }
+    },
+    'RedCNN2D': {
+        'parameters': '/home/dpietsch/4DCT/parameters/RedCNN2d_epoch441_loss0.000031.pth',
+        'config': '/home/dpietsch/4DCT/configs/RedCNN2D.yml',
+    },
+    
 
 }
 
@@ -77,18 +85,31 @@ MODELS = {
 # loading
 #------------------------------------------------------------------------------------
 
-def build(ckpt_path, config_path):
-    ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
-    if not isinstance(ckpt, dict):
-        raise ValueError('checkpoint is not valid')
+def crop_margin(config):
+    return tuple(int(m) for m in config.get('crop', {}).get('margin', DEFAULT_MARGIN))
 
-    config = ckpt.get('config')
+def common_margin(configs):
+    return tuple(max(m) for m in zip(*(crop_margin(c) for c in configs.values())))
+
+def build(ckpt_path, config_path):
+    ckpt = None
+    if ckpt_path != '':
+        ckpt = torch.load(ckpt_path, map_location=DEVICE, weights_only=False)
+        if not isinstance(ckpt, dict):
+            raise ValueError('checkpoint is not valid')
+
+    config = None #ckpt.get('config')
     if config is None:
         with open(config_path) as f:
             config = yaml.safe_load(f)
 
-    model = FilterBank(config['model']['stages']).to(DEVICE).eval()
-    model.load_state_dict(ckpt['model'])
+    if config['name'].startswith('Red'):
+        model = CNN(config['model']['stages']).to(DEVICE).eval()
+    else: 
+        model = FilterBank(config['model']['stages']).to(DEVICE).eval()
+
+    if ckpt is not None:
+        model.load_state_dict(ckpt['model'], strict=False)
 
     return model, config, ckpt
 
@@ -102,19 +123,25 @@ def load_models():
 def initial_model(config):
     return FilterBank(config['model']['stages']).eval()
 
-def load_scan(row, margin=MARGIN):
+def load_scan(row, margin=None):
+    _, mh, mw = margin or MARGIN
     clean = np.concatenate([np.load(p) for p in row['clean']], axis=0)
     noisy = np.concatenate([np.load(p) for p in row['noise']], axis=0)
 
-    pad = ((0, 0), (0, 0), (margin, margin),  (margin, margin))
+    pad = ((0, 0), (0, 0), (mh, mh),  (mw, mw))
     clean, noisy = np.pad(clean, pad), np.pad(noisy, pad)
 
-    y0, y1, x0, x1 = body_box(clean, pad=margin)
+    y0, y1, x0, x1 = body_box(clean, pad=max(mh, mw))
     to_t = lambda a: torch.from_numpy(a[..., y0:y1, x0:x1].astype(np.float32))[None, None].to(DEVICE)
     return to_t(clean), to_t(noisy), (y0, x0)
 
 def load_prediction(row, method):
-    return torch.from_numpy(np.stack([np.load(p) for p in row[method]]))[None, None].to(DEVICE)
+    files = prediction_files(method, row.name, len(row['noise']))
+    missing = [f for f in files if not f.exists()]
+    if missing:
+        raise FileNotFoundError(f'{method}/{row.name}: {len(missing)} prediction file(s) missing, '
+                                f'run with --stage denoise or add the model to ensure_predictions')
+    return torch.from_numpy(np.stack([np.load(f) for f in files]))[None, None].to(DEVICE)
 
 def roi_in_frame(scan_id, origin, shape):
     d0, d1, r0, r1, c0, c1 = AORTA_ROI[scan_id]
@@ -213,6 +240,8 @@ def plot_stage(name, learned, initial, out_prefix):
     if learned.shape[1:] == (1, 1, 1):
         return
 
+    plot_slices(name, learned, initial, out_prefix)
+
     # temporal offset x spatial distance, learned and difference to start
     t_off, radii, m_l = time_distance_map(learned)
     _, _, m_i = time_distance_map(initial)
@@ -291,6 +320,42 @@ def plot_lut(name, hu, learned, initial, out_prefix):
     fig.savefig(f'{out_prefix}_profiles.png', dpi=200)
     plt.close(fig)
 
+def plot_slices(name, learned, initial, out_prefix, log=True):
+    T, R, C, Z = learned.shape
+    z0 = Z // 2
+    t_off = (np.arange(T) - T // 2)
+    vmax = max(initial.max(), learned.max())
+    if log:
+        lo = max(min(initial.min(), learned.min()), vmax * 1e-4)
+        seq = lambda: dict(cmap='Blues', norm=LogNorm(lo, vmax))
+    else:
+        seq = lambda: dict(cmap='Blues', vmin=0.0, vmax=vmax)
+
+    diff = learned - initial
+    lim = max(np.abs(diff).max(), 1e-12)
+
+    fig, axes = plt.subplots(3, T, figsize=(1.45 * T + 1.6, 5.2), squeeze=False,
+                             gridspec_kw=dict(wspace=0.08, hspace=0.18))
+    rows = [('initial Gaussian', np.maximum(initial, 1e-12), seq()),
+            ('learned', np.maximum(learned, 1e-12), seq()),
+            ('learned - initial', diff, dict(cmap='coolwarm', norm=TwoSlopeNorm(0.0, -lim, lim)))]
+    for r, (label, k, kw) in enumerate(rows):
+        for c in range(T):
+            ax = axes[r, c]
+            im = ax.imshow(k[c, :, :, z0], origin='lower', **kw)
+            ax.set_xticks([]); ax.set_yticks([])
+            if r == 0:
+                ax.set_title(f'Δt = {t_off[c]:+d}' if t_off[c] else 'Δt = 0', fontsize=11)
+            if c == 0:
+                ax.set_ylabel(label, fontsize=11)
+        fig.colorbar(im, ax=axes[r, :].tolist(), fraction=0.015, pad=0.01)
+    fig.suptitle(f'{name}: row × col planes at central z{" (log scale)" if log else ""}',
+                 x=0.02, ha='left', fontsize=11)
+    fig.savefig(f'{out_prefix}_slices.png', dpi=200, bbox_inches='tight')
+    plt.close(fig)
+
+
+
 #------------------------------------------------------------------------------------
 # metrics
 #------------------------------------------------------------------------------------
@@ -341,7 +406,7 @@ def volume_metrics(pred, target, mask=None):
 # stages
 #------------------------------------------------------------------------------------
 
-def stage_metrics(models, df, out_csv):
+def stage_metrics(models, df, out_csv, configs):
     rows = []
     for scan_id, row in tqdm(list(df.iterrows()), desc='metrics'):
         clean, noisy, _ = load_scan(row)
@@ -402,12 +467,13 @@ def stage_params(models, configs, out_csv):
     rows = []
     for method, model in models.items():
         total = sum(p.numel() for p in model.parameters() if p.requires_grad)
-        scalars = model.scalar_parameters()
+        scalars = model.scalar_parameters() if isinstance(model, FilterBank) else {}
+        stages = len(model.stages) if isinstance(model, FilterBank) else 0
         rows.append(dict(method=method, trainable_parameters=total,
-                          stages=len(model.stages), **scalars))
+                          stages=stages, **scalars))
 
         for name, param in model.named_parameters():
-            if param.numel() > 1:
+            if param.numel() > 1 and isinstance(model, FilterBank):
                 path = RESULTS / f'param_{method}_{name.replace(".", "_")}.npy'
                 np.save(path, param.detach().cpu().numpy())
 
@@ -486,13 +552,22 @@ def stage_figures(models, df, metrics_csv):
 
     stage_qualitative(models, df)
 
+def center_crop_to(x, shape):
+    H, W = x.shape[-2:]
+    h, w = shape[-2:]
+    dy, dx = (H - h) // 2, (W - w) // 2
+    if dy < 0 or dx < 0:
+        raise ValueError(f'prediction {tuple(x.shape)} smaller than scan frame {tuple(shape)}')
+    return x[..., dy:dy + h, dx:dx + w]
+
 def stage_qualitative(models, df):
     for scan_id, row in tqdm(list(df.iterrows()), desc='qualitative'):
-        clean, noisy, origin = load_scan(row)
-        volumes = {'reference': inplane_interior(clean, MARGIN),
-                   'noisy': inplane_interior(noisy, MARGIN)}
+        clean, noisy, origin = load_scan(row, margin=QUAL_MARGIN)
+        volumes = {'reference': inplane_interior(clean, QUAL_MARGIN),
+                   'noisy': inplane_interior(noisy, QUAL_MARGIN)}
         for method, model in models.items():
-            volumes[method] = inplane_interior(load_prediction(row, method), MARGIN)
+            pred = center_crop_to(load_prediction(row, method), clean.shape)
+            volumes[method] = inplane_interior(pred, QUAL_MARGIN)
 
         roi = roi_in_frame(scan_id, origin, volumes['reference'].shape) \
             if scan_id in AORTA_ROI else None
@@ -518,6 +593,8 @@ def stage_qualitative(models, df):
 def stage_luts(models, configs, out_dir=RESULTS / 'luts'):
     out_dir.mkdir(parents=True, exist_ok=True)
     for method, model in models.items():
+        if not isinstance(model, FilterBank):
+            continue
         start = initial_model(configs[method])
         for i, (stage, stage0) in enumerate(zip(model.stages, start.stages)):
             if not hasattr(stage, 'activated_lut'):
@@ -537,6 +614,8 @@ def stage_kernels(models, configs, out_dir=RESULTS / 'kernels'):
     out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for method, model in models.items():
+        if not isinstance(model, FilterBank):
+            continue
         start = initial_model(configs[method])
         for i, (stage, stage0) in enumerate(zip(model.stages, start.stages)):
             if not hasattr(stage, 'kernel_weights'):
@@ -566,7 +645,7 @@ def predictions_current(method):
     return marker.exists() and marker.read_text().strip() == str(MODELS[method]['parameters'])
 
 @torch.no_grad()
-def ensure_predictions(models, df, force=False):
+def ensure_predictions(models, configs, df, force=False):
     todo = {}
     for method in models:
         stale = force or not predictions_current(method)
@@ -585,7 +664,10 @@ def ensure_predictions(models, df, force=False):
         for method, model in models.items():
             if scan_id not in todo.get(method, ()):
                 continue
-            denoised = denoise(noisy, model).cpu().numpy()
+            chunk = 8 if isinstance(model, CNN) else 32
+            overlap = crop_margin(configs[method])[0]
+            denoised = denoise(noisy, model, chunk=chunk, overlap=overlap).cpu().numpy()
+
             files = prediction_files(method, scan_id, len(row['noise']))
             files[0].parent.mkdir(parents=True, exist_ok=True)
             for i, path in enumerate(files):
@@ -612,7 +694,50 @@ def summarize(metrics_csv):
     print(f'\nmean +- std over scans at phase {PHASE_INDEX}\n')
     print(at_phase.groupby(['batch', 'method'])[cols].agg(['mean', 'std']).round(4).to_string())
 
+def merge_old_new_metrics(old_metrics_csv, new_metrics_csv, out_csv=None, atol=1e-3):
+    KEYS = ['scan', 'method', 'phase']
+    SHARED = 'noisy'                                  # model-independent rows, present in both runs
+    REGION_METRICS = ['psnr', 'psnr_lung', 'rmse_hu']
+    """Take every method of the new run from the new CSV and all remaining methods from the old one.
+
+    Refuses to merge if the noisy rows of both runs differ, i.e. if the runs were not
+    evaluated on the same scans, phases and region.
+    """
+    old = pd.read_csv(old_metrics_csv)
+    new = pd.read_csv(new_metrics_csv)
+
+    if set(old.columns) != set(new.columns):
+        raise ValueError(f'columns differ: only in old {sorted(set(old.columns) - set(new.columns))}, '
+                         f'only in new {sorted(set(new.columns) - set(old.columns))}')
+
+    # same evaluation region? then the noisy input scores identically in both runs
+    a = old[old['method'] == SHARED].set_index(KEYS)[REGION_METRICS]
+    b = new[new['method'] == SHARED].set_index(KEYS)[REGION_METRICS]
+    if set(a.index) != set(b.index):
+        raise ValueError('the runs cover different scans or phases')
+    diff = (a - b.loc[a.index]).abs().max()
+    if (diff > atol).any():
+        raise ValueError(f'noisy rows differ between the runs (max abs diff {diff.to_dict()}), '
+                         f'so they were not evaluated on the same region')
+
+    new_methods = set(new['method']) - {SHARED}
+    merged = pd.concat([old[~old['method'].isin(new_methods)],   # keeps noisy from the old run
+                        new[new['method'].isin(new_methods)]],
+                       ignore_index=True)
+    assert not merged.duplicated(KEYS).any()
+
+    print(f'replaced: {sorted(new_methods & set(old["method"]))}')
+    print(f'added:    {sorted(new_methods - set(old["method"]))}')
+    print(f'kept:     {sorted(set(old["method"]) - new_methods - {SHARED})}')
+
+    if out_csv is not None:
+        merged.to_csv(out_csv, index=False)
+        print(f'wrote {out_csv}')
+    return merged
+
+
 def main():
+
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--stage', nargs='+',
@@ -624,14 +749,16 @@ def main():
     RESULTS.mkdir(exist_ok=True, parents=True)
     metrics_csv = RESULTS / 'test_metrics.csv'
     df = CTValidationDataset.generate_dataframe(TEST_DATA)
-    models, configs, ckpts = load_models()
+    models, configs, _ = load_models()
+    global MARGIN
+    MARGIN = common_margin(configs)
     needs_predictions = {'metrics', 'roi', 'figures', 'denoise'} & set(args.stage)
-    if needs_predictions:
-        df = ensure_predictions(models, df, force='denoise' in args.stage)
+    #if needs_predictions:
+    #    df = ensure_predictions(models, configs, df, force='denoise' in args.stage)
 
  
     if 'metrics' in args.stage:
-        stage_metrics(models, df, metrics_csv)
+        stage_metrics(models, df, metrics_csv, configs)
     if 'roi' in args.stage:
         stage_roi(models, df, RESULTS / 'roi_std.csv')
     if 'params' in args.stage:

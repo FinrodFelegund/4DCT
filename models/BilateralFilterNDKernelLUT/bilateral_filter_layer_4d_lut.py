@@ -93,7 +93,8 @@ class BilateralFilter4DLUT(torch.nn.Module):
                  window_size_t=9,
                  symmetric_lut=True,
                  kernel_floor=1e-6,
-                 use_gpu=True):
+                 use_gpu=True,
+                 ):
 
         super().__init__()
 

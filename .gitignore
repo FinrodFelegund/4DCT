@@ -10,6 +10,7 @@ parameters/
 *.nii
 datainfo/
 Claude.md
+results/pred/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
