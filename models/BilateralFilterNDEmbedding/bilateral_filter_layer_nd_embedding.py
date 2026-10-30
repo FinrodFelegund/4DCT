@@ -52,7 +52,7 @@ class BilateralFilterFunctionNdEmbeddingGPU(torch.autograd.Function):
         inputTensor, outputTensor, outputWeightsTensor, embedding = ctx.saved_tensors
         hidden_width, hidden_layers, pad_t = ctx.hidden_width, ctx.hidden_layers, ctx.pad_t
         grad_input, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, grad_embedding = bilateral_filter_nd_embedding_gpu_lib.backward_gpu(grad_output, inputTensor, outputTensor, outputWeightsTensor, *ctx.sigmas, embedding, hidden_width, hidden_layers, pad_t)
-        grad_sigmas = [torch.sum(grad_output * d_s)
+        grad_sigmas = [torch.sum(d_s)
                        for i, d_s in enumerate((dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z))]
         
         return (grad_input, grad_sigmas, grad_embedding, None, None, None)

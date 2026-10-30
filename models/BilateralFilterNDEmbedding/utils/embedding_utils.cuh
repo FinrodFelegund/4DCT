@@ -2,7 +2,7 @@
 
 #include <cuda.h>
 #include <cuda_runtime.h>
-
+#include <math.h>
 
 
 template <typename scalar_t>
@@ -11,52 +11,51 @@ __device__ __forceinline__ scalar_t linearActivation(scalar_t z){
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t linearActivationd(scalar_t z){
-    return z;
-
+__device__ __forceinline__ scalar_t linearActivationd(scalar_t h){
+    return (scalar_t)1;
 }
 
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t sigmoidActivation(scalar_t z){
-
+    return (scalar_t)1 / (1 + exp(-z));
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t sigmoidActivationd(scalar_t z){
-    
+__device__ __forceinline__ scalar_t sigmoidActivationd(scalar_t h){
+    return h * (1 - h);
 }
 
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t tanhActivation(scalar_t z){
-
+    return tanh(z);
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t tanhActivationd(scalar_t z){
-    
+__device__ __forceinline__ scalar_t tanhActivationd(scalar_t h){
+    return 1 - h * h;
 }
 
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t reluActivation(scalar_t z){
-
+    return z > (scalar_t)0 ? z : (scalar_t)0; 
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t reluActivationd(scalar_t z){
-
+__device__ __forceinline__ scalar_t reluActivationd(scalar_t h){
+    return h > (scalar_t)0 ? (scalar_t)1 : (scalar_t)0;
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t leakyReluActivation(scalar_t z){
-
+__device__ __forceinline__ scalar_t leakyReluActivation(scalar_t z, const scalar_t negativeSlope){
+    return z > (scalar_t)0 ? z : negativeSlope * z;
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t leakyReluActivationd(scalar_t z){
-
+__device__ __forceinline__ scalar_t leakyReluActivationd(scalar_t h, const scalar_t negativeSlope){
+    return h > (scalar_t)0 ? (scalar_t)1 : negativeSlope;
 }
 
-template <typename scalar_t, int H, int L>
+template <typename scalar_t, int H, int L, int ACT>
 struct Embedding {
 
     const scalar_t* weightsIn;
@@ -66,10 +65,9 @@ struct Embedding {
     const scalar_t* weightsOut;
     const scalar_t* biasOut;
 
-    const char* activationFunction;
 
 
-    __device__ Embedding(const scalar_t* weights, char* activationFunction){
+    __device__ Embedding(const scalar_t* weights){
         //do some pointer aithmetic such that each member pointer points to the start of their correpsonding memory block
 
         weightsIn = weights; weights += 2 * H;
@@ -81,40 +79,43 @@ struct Embedding {
         weightsOut = weights; weights += H;
         biasOut = weights;
 
-        this->activationFunction = activationFunction;
     }
 
-    __device__ scalar_t activation(scalar_t){
-        switch(this->activationFunction){
-            case "linear":
-
-        }
+    __device__ __forceinline__ scalar_t activation(const scalar_t z) const {
+        if constexpr (ACT == 0) return linearActivation(z);
+        else if constexpr (ACT == 1) return sigmoidActivation(z);
+        else if constexpr (ACT == 2) return tanhActivation(z);
+        else if constexpr (ACT == 3) return reluActivation(z);
+        else return leakyReluActivation(z, (scalar_t)0.2);
     }
+    
 
-    __device__ scalar_t derivativeActivation(scalar_t){
-        switch(this->activationFunction){
-            case "linear":
-        }
+    __device__ __forceinline__ scalar_t derivativeActivation(const scalar_t h) const {
+        if constexpr (ACT == 0) return linearActivationd(h);
+        else if constexpr (ACT == 1) return sigmoidActivationd(h);
+        else if constexpr (ACT == 2) return tanhActivationd(h);
+        else if constexpr (ACT == 3) return reluActivationd(h);
+        else return leakyReluActivationd(h, (scalar_t)0.2);
     }
 };
 
 
 
-template <typename scalar_t, int H, int L>
-__device__ __forceinline__ void embeddingHome(const Embedding<scalar_t, H, L>& network, scalar_t xHome, scalar_t (&homePart)[H]){
+template <typename scalar_t, int H, int L, int ACT>
+__device__ __forceinline__ void embeddingHome(const Embedding<scalar_t, H, L, ACT>& network, scalar_t xHome, scalar_t (&homePart)[H]){
 #pragma unroll
     for(int i = 0; i < H; i++){
         homePart[i] = network.weightsIn[2 * i] * xHome + network.biasIn[i];
     }
 }
 
-template <typename scalar_t, int H, int L>
-__device__ __forceinline__ scalar_t embeddingForward(const Embedding<scalar_t, H, L>& network, const scalar_t (&homePart)[H], scalar_t xNeighbour){
+template <typename scalar_t, int H, int L, int ACT>
+__device__ __forceinline__ scalar_t embeddingForward(const Embedding<scalar_t, H, L, ACT>& network, const scalar_t (&homePart)[H], scalar_t xNeighbour){
     scalar_t h[H];
 
 #pragma unroll
     for(int i = 0; i < H; i++){
-        h[i] = activation(homePart[i] + network.weightsIn[2 * i + 1] * xNeighbour); //bias and weights for home voxel were already added
+        h[i] = network.activation(homePart[i] + network.weightsIn[2 * i + 1] * xNeighbour); //bias and weights for home voxel were already added
     }
 
 #pragma unroll
@@ -129,7 +130,7 @@ __device__ __forceinline__ scalar_t embeddingForward(const Embedding<scalar_t, H
             for(int j = 0; j < H; j++){
                 z += W[i * H + j] * h[j];
             }
-            next[i] = activation(z);
+            next[i] = network.activation(z);
         }
 #pragma unroll
         for(int i = 0; i < H; i++){
@@ -144,12 +145,12 @@ __device__ __forceinline__ scalar_t embeddingForward(const Embedding<scalar_t, H
     return out;
 }
 
-template <typename scalar_t, int H, int L>
-__device__ __forceinline__ scalar_t embeddingForwardRegistered(const Embedding<scalar_t, H, L>& network, const scalar_t (&homePart)[H], scalar_t xNeighbour, scalar_t (&layerRegister)[L + 1][H]){
+template <typename scalar_t, int H, int L, int ACT>
+__device__ __forceinline__ scalar_t embeddingForwardRegistered(const Embedding<scalar_t, H, L, ACT>& network, const scalar_t (&homePart)[H], scalar_t xNeighbour, scalar_t (&layerRegister)[L + 1][H]){
 
 #pragma unroll
     for(int i = 0; i < H; i++){
-        layerRegister[0][i] = activation(homePart[i] + network.weightsIn[2 * i + 1] * xNeighbour);
+        layerRegister[0][i] = network.activation(homePart[i] + network.weightsIn[2 * i + 1] * xNeighbour);
     }
 
 #pragma unroll
@@ -163,7 +164,7 @@ __device__ __forceinline__ scalar_t embeddingForwardRegistered(const Embedding<s
             for(int j = 0; j < H; j++){
                 z += W[i * H + j] * layerRegister[l - 1][j];
             }
-            layerRegister[l][i] = activation(z);
+            layerRegister[l][i] = network.activation(z);
         }
     }
     scalar_t out = *(network.biasOut);
@@ -175,39 +176,44 @@ __device__ __forceinline__ scalar_t embeddingForwardRegistered(const Embedding<s
 }
 
 //partial derivatives with respect to weights and biases, multiplied by netwok scaling factor
-template <typename scalar_t, int H, int L>
-__device__ __forceinline__ scalar_t* embeddingBackward(const Embedding<scalar_t, H, L>& network, const scalar_t (&input)[2], scalar_t outputGradient, scalar_t (&layerRegister)[L + 1][H], scalar_t *gradientRegister){
+template <typename scalar_t, int H, int L, int ACT>
+__device__ __forceinline__ void embeddingBackward(const Embedding<scalar_t, H, L, ACT>& network, const scalar_t (&input)[2], scalar_t (&inputGradient)[2], scalar_t outputGradient, scalar_t (&layerRegister)[L + 1][H], scalar_t *gradientRegister){
+
+    inputGradient[0] = (scalar_t)0;
+    inputGradient[1] = (scalar_t)0;
 
     //we already computed the derivative with respect to the network output
     scalar_t *weightGradients = gradientRegister + 2 * H + H + L * H * H + L * H; //we land at the memeory location of the output weights
-    scalar_t *biasGradients = gradientRegister + 2 * H + H + L * H * H + L * H + H; //we land at the memory location of the output bias
+    scalar_t *biasGradients = gradientRegister +   2 * H + H + L * H * H + L * H + H; //we land at the memory location of the output bias
     *biasGradients += outputGradient;
 #pragma unroll
     for(int j = 0; j < H; j++){
         weightGradients[j] += outputGradient * layerRegister[L][j];
-        layerRegister[L][j] = outputGradient * network.weightsOut[j];
+        layerRegister[L][j] = outputGradient * network.weightsOut[j] * network.derivativeActivation(layerRegister[L][j]);
     }
 
-    weightsGradients = weightGradients - L * H - H * H; //we land at the memory location of the last hidden layer
-    biasGradients = biasGradients - 2 * H; //we land at the memory locatioj of the last hidden bias
+    if(L > 0){
+        weightGradients = weightGradients - L * H - H * H; //we land at the memory location of the last hidden layer
+        biasGradients = biasGradients - 2 * H; //we land at the memory locatioj of the last hidden bias
+    }
 #pragma unroll
     for(int l = L - 1; l >= 0; l--){
         scalar_t temp_layer[H] = { (scalar_t)0 };
-        const scalar_t* W = network.weightsHidden + (l - 1) * H * H; //memory location of the network hidden weights
-        const scalar_t* b = network.biasHidden + (l - 1) * H; //memery location of the netowrk hidden biases
+        const scalar_t* W = network.weightsHidden + l * H * H; //memory location of the network hidden weights
+        //const scalar_t* b = network.biasHidden + l * H; //memery location of the netowrk hidden biases
 #pragma unroll
         for(int i = 0; i < H; i++){
             biasGradients[i] += layerRegister[l + 1][i]; //gradient with respect to the bias
 
 #pragma unroll
             for(int j = 0; j < H; j++){
-                weightGradients[i * H + j] = layerRegister[l][j] * layerRegister[l + 1][i]; //gradient with respect to weight w^l_ij
-                temp_layer W[j] += W[i * H + j] * layerRegister[l + 1][i];
+                weightGradients[i * H + j] += layerRegister[l][j] * layerRegister[l + 1][i]; //gradient with respect to weight w^l_ij
+                temp_layer[j] += W[i * H + j] * layerRegister[l + 1][i];
             }
         }
-
+#pragma unroll
         for(int i = 0; i < H; i++){
-            layerRegister[l][i] = temp_layer[i];
+            layerRegister[l][i] = temp_layer[i] * network.derivativeActivation(layerRegister[l][i]);
         }
         if(l != 0){
             weightGradients = weightGradients - H * H;
@@ -215,22 +221,24 @@ __device__ __forceinline__ scalar_t* embeddingBackward(const Embedding<scalar_t,
         }
     }
 
-    weightGradients = weightGradients - 2 * H * H;
-    biasGradients = biasGradients - L * H * H - H;
+    if(L > 0){
+        weightGradients = weightGradients - 2 * H - H;
+        biasGradients = biasGradients - L * H * H - H;
+    } else {
+        weightGradients = gradientRegister;
+        biasGradients = gradientRegister + 2 * H;
+    }
 
-    scalar_t* voxel_gradient = new scalar_t[2](); //make sure to delete this array in the kernel!!!
+
 #pragma unroll
     for(int i = 0; i < H; i++){
         biasGradients[i] += layerRegister[0][i];
 
 #pragma unroll
         for(int j = 0; j < 2; j++){
-            weightGradients[i * H + j] = input[j] * layerRegister[0][i];
-            voxel_gradient[j] += network.weightsIn[i * H + j] * layerRegister[0][i];
+            weightGradients[2 * i + j] += input[j] * layerRegister[0][i];
+            inputGradient[j] += network.weightsIn[2 * i + j] * layerRegister[0][i];
         }
     }
-
-    return voxel_gradient;
-
 }
 
