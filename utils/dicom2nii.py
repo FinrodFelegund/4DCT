@@ -43,6 +43,20 @@ def convert_4D_CT(patient_dir: str, output_dir: str, reorient: bool = True):
                 except Exception as e:
                     print(f'Error: failed to convert {phase_dir.name} | {e}')
 
+def convert_3D_CT(scan_dir: str, output_dir: str, reorient: bool = True):
+    INPUT_DIR = Path(scan_dir)
+    OUTPUT_DIR = Path(output_dir)
+    output_name = scan_dir.rsplit('/', 1)[-1]
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    try:
+        dicom2nifti.dicom_series_to_nifti(original_dicom_directory=str(INPUT_DIR),
+                                          output_file=str(OUTPUT_DIR / f'{output_name}.nii'),
+                                          reorient_nifti=reorient)
+    except Exception as e:
+        print(f'Error creating .nii file for file: {INPUT_DIR}')
+
 def rename_nii(input_dir: str):
     input_dir = Path(input_dir)
 
@@ -71,5 +85,4 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    convert_4D_CT(args.input_path, args.output_path, True)
-    rename_nii(args.output_path)
+    convert_3D_CT(args.input_path, args.output_path, True)

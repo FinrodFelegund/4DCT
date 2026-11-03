@@ -28,7 +28,8 @@ dependencies = [
 	"bilateralfilter4D-torch-learnable-spt",
 	"bilateralfilter4D-torch-lut",
 	"bilateralfilterND-torch",
-	"bilateralfilterND-torch-lut"
+	"bilateralfilterND-torch-lut",
+	"bilateralfilterND-torch-embedding"
 ]
 
 [tool.uv]
@@ -40,7 +41,8 @@ no-build-isolation-package = [
 	"bilateralfilter4D-torch-learnable-spt",
 	"bilateralfilter4D-torch-lut",
 	"bilateralfilterND-torch",
-	"bilateralfilterND-torch-lut"
+	"bilateralfilterND-torch-lut",
+	"bilateralfilterND-torch-embedding"	
 ]
 
 [tool.uv.sources]
@@ -54,6 +56,7 @@ bilateralfilter4D-torch-learnable-spt = { path = "models/BilateralFilterNDKernel
 bilateralfilter4D-torch-lut = { path = "models/BilateralFilterNDKernelLUT", editable = true }
 bilateralfilterND-torch = { path = "models/BilateralFilterND", editable = true }
 bilateralfilterND-torch-lut = { path = "models/BilateralFilterNDLUT", editable = true }
+bilateralfilterND-torch-embedding = { path = "models/BilateralFilterNDEmbedding", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cu124"

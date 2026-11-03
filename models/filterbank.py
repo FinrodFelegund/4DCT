@@ -32,6 +32,10 @@ def _ndlut(**kwargs):
     from bilateral_filter_layer_nd_lut import BilateralFilterNdLUT
     return BilateralFilterNdLUT(**kwargs)
 
+def _ndembedding(**kwargs):
+    from bilateral_filter_layer_nd_embedding import BilateralFilterNdEmbedding
+    return BilateralFilterNdEmbedding(**kwargs)
+
 STAGE_BUILDERS = {
     'spatial3d': _spatial3d,
     'temporal4d': _temporal4d,
@@ -41,6 +45,7 @@ STAGE_BUILDERS = {
     'ndlut': _ndlut,
     'learnable_spt4d': _learnable_spt4d,
     'lut4d': _lut4d,
+    'ndembedding': _ndembedding,
 }
 
 class FilterBank(torch.nn.Module):

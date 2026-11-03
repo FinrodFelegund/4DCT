@@ -4,6 +4,17 @@
 #include <cuda_runtime.h>
 #include <math.h>
 
+template <typename scalar_t>
+__device__ __forceinline__ void warpAccumulate(scalar_t* address, scalar_t value){
+#pragma unroll
+    for(int offset = 16; offset > 0; offset >>= 1){
+        value += __shfl_down_sync(0xffffffff, value, offset);
+    }
+    if((threadIdx.x & 31) == 0 && value !=(scalar_t)0){
+        atomicAdd(address, value);
+    }
+}
+
 
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t linearActivation(scalar_t z){
@@ -55,6 +66,18 @@ __device__ __forceinline__ scalar_t leakyReluActivationd(scalar_t h, const scala
     return h > (scalar_t)0 ? (scalar_t)1 : negativeSlope;
 }
 
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t softplusActivation(scalar_t z){
+    return z > (scalar_t)0 ? z + log1p(exp(-z)) : log1p(exp(z));
+    
+}
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t softplusActivationd(scalar_t h){
+    //this is a simplification from the inverse softplus inside the derivative of it, so we dont need to store the preactivation
+    return -expm1(-h);
+}
+
 template <typename scalar_t, int H, int L, int ACT>
 struct Embedding {
 
@@ -86,7 +109,8 @@ struct Embedding {
         else if constexpr (ACT == 1) return sigmoidActivation(z);
         else if constexpr (ACT == 2) return tanhActivation(z);
         else if constexpr (ACT == 3) return reluActivation(z);
-        else return leakyReluActivation(z, (scalar_t)0.2);
+        else if constexpr (ACT == 4) return leakyReluActivation(z, 0.2);
+        else return 1;
     }
     
 
@@ -95,7 +119,8 @@ struct Embedding {
         else if constexpr (ACT == 1) return sigmoidActivationd(h);
         else if constexpr (ACT == 2) return tanhActivationd(h);
         else if constexpr (ACT == 3) return reluActivationd(h);
-        else return leakyReluActivationd(h, (scalar_t)0.2);
+        else if constexpr (ACT == 4) return leakyReluActivationd(h, 0.2);
+        else return 1;
     }
 };
 
@@ -142,6 +167,8 @@ __device__ __forceinline__ scalar_t embeddingForward(const Embedding<scalar_t, H
     for(int j = 0; j < H; j++){
         out += network.weightsOut[j] * h[j];
     }
+    //softplus, so that the weight is never negative and the weight sum in the kernel does not approach zero
+    out = softplusActivation(out);
     return out;
 }
 
@@ -172,23 +199,27 @@ __device__ __forceinline__ scalar_t embeddingForwardRegistered(const Embedding<s
     for(int j = 0; j < H; j++){
         out += network.weightsOut[j] * layerRegister[L][j];
     }
+    //softplus, so that the weight is never negative and the weight sum in the kernel does not approach zero
+    out = softplusActivation(out);
     return out;
 }
 
 //partial derivatives with respect to weights and biases, multiplied by netwok scaling factor
 template <typename scalar_t, int H, int L, int ACT>
-__device__ __forceinline__ void embeddingBackward(const Embedding<scalar_t, H, L, ACT>& network, const scalar_t (&input)[2], scalar_t (&inputGradient)[2], scalar_t outputGradient, scalar_t (&layerRegister)[L + 1][H], scalar_t *gradientRegister){
+__device__ __forceinline__ void embeddingBackward(const Embedding<scalar_t, H, L, ACT>& network, const scalar_t (&input)[2], scalar_t (&inputGradient)[2], scalar_t outputGradient, scalar_t output, scalar_t (&layerRegister)[L + 1][H], scalar_t *gradientRegister){
 
     inputGradient[0] = (scalar_t)0;
     inputGradient[1] = (scalar_t)0;
 
-    //we already computed the derivative with respect to the network output
+    //we keep the output strictly >= 0 with softplus, so we need to take the derivative of it first
+    outputGradient = outputGradient * softplusActivationd(output);
+
     scalar_t *weightGradients = gradientRegister + 2 * H + H + L * H * H + L * H; //we land at the memeory location of the output weights
     scalar_t *biasGradients = gradientRegister +   2 * H + H + L * H * H + L * H + H; //we land at the memory location of the output bias
-    *biasGradients += outputGradient;
+    warpAccumulate(biasGradients, outputGradient);
 #pragma unroll
     for(int j = 0; j < H; j++){
-        weightGradients[j] += outputGradient * layerRegister[L][j];
+        warpAccumulate(&weightGradients[j], outputGradient * layerRegister[L][j]);
         layerRegister[L][j] = outputGradient * network.weightsOut[j] * network.derivativeActivation(layerRegister[L][j]);
     }
 
@@ -203,11 +234,11 @@ __device__ __forceinline__ void embeddingBackward(const Embedding<scalar_t, H, L
         //const scalar_t* b = network.biasHidden + l * H; //memery location of the netowrk hidden biases
 #pragma unroll
         for(int i = 0; i < H; i++){
-            biasGradients[i] += layerRegister[l + 1][i]; //gradient with respect to the bias
+            warpAccumulate(&biasGradients[i], layerRegister[l + 1][i]); //gradient with respect to the bias
 
 #pragma unroll
             for(int j = 0; j < H; j++){
-                weightGradients[i * H + j] += layerRegister[l][j] * layerRegister[l + 1][i]; //gradient with respect to weight w^l_ij
+                warpAccumulate(&weightGradients[i * H + j], layerRegister[l][j] * layerRegister[l + 1][i]); //gradient with respect to weight w^l_ij
                 temp_layer[j] += W[i * H + j] * layerRegister[l + 1][i];
             }
         }
@@ -232,11 +263,11 @@ __device__ __forceinline__ void embeddingBackward(const Embedding<scalar_t, H, L
 
 #pragma unroll
     for(int i = 0; i < H; i++){
-        biasGradients[i] += layerRegister[0][i];
+        warpAccumulate(&biasGradients[i], layerRegister[0][i]);
 
 #pragma unroll
         for(int j = 0; j < 2; j++){
-            weightGradients[2 * i + j] += input[j] * layerRegister[0][i];
+            warpAccumulate(&weightGradients[2 * i + j], input[j] * layerRegister[0][i]);
             inputGradient[j] += network.weightsIn[2 * i + j] * layerRegister[0][i];
         }
     }

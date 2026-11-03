@@ -20,7 +20,8 @@ std::tuple<torch::Tensor, torch::Tensor>BilateralFilterCudaForward(torch::Tensor
                                                                     torch::Tensor weights,
                                                                     int hiddenWidth,
                                                                     int nHidden,
-                                                                    int pad_t);
+                                                                    int pad_t,
+                                                                    int act);
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>BilateralFilterCudaBackward(torch::Tensor gradientInputTensor,
                                                                                                     torch::Tensor inputTensor,
@@ -33,5 +34,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
                                                                                                     torch::Tensor weights,
                                                                                                     int hiddenWidth,
                                                                                                     int nHidden,
-                                                                                                    int pad_t);
+                                                                                                    int pad_t,
+                                                                                                    int act);
                                 

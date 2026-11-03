@@ -27,21 +27,39 @@ def unpad_circular_t(x: torch.Tensor, pad_t: int):
 
     return x[:, :, pad_t:-pad_t]
 
+def activation_to_key(act: str):
+    key = 0
+    if act == 'linear':
+        key = 0
+    elif act == 'sigmoid':
+        key = 1
+    elif act == 'tanh':
+        key = 2
+    elif act == 'relu':
+        key = 3
+    elif act == 'leakyrelu':
+        key = 4
+    else:
+        raise ValueError(f'Activation function must be one of (linear, sigmoid, tanh, relu, leakyrelu), got {act}')
+
+    return key
+    
+
 class BilateralFilterFunctionNdEmbeddingGPU(torch.autograd.Function):
     @staticmethod
     def forward(ctx, inputTensor: torch.Tensor,
                 sigma_t: torch.nn.Parameter, sigma_x: torch.nn.Parameter, sigma_y: torch.nn.Parameter, sigma_z: torch.nn.Parameter,
-                embedding: torch.Tensor, hidden_width: int, hidden_layers: int, pad_t: int):
+                embedding: torch.Tensor, hidden_width: int, hidden_layers: int, activation: int, pad_t: int):
         
         assert inputTensor.shape[1] == 1, 'Currently only one channel images are supported'
         assert inputTensor.dim() == 6, 'Input shape must be [B, C, T, H, W, D]'
 
         inputTensor, embedding = inputTensor.contiguous(), embedding.contiguous()
         outputTensor, outputWeightsTensor = bilateral_filter_nd_embedding_gpu_lib.forward_gpu(inputTensor, float(sigma_t), float(sigma_x), float(sigma_y), float(sigma_z),
-                                                                                              embedding, int(hidden_width), int(hidden_layers))
+                                                                                              embedding, int(hidden_width), int(hidden_layers), int(pad_t), int(activation))
         ctx.save_for_backward(inputTensor, outputTensor, outputWeightsTensor, embedding)
         ctx.sigmas = tuple(float(s) for s in (sigma_t, sigma_x, sigma_y, sigma_z))
-        ctx.hidden_width, ctx.hidden_layers, ctx.pad_t = int(hidden_width), int(hidden_layers), int(pad_t)
+        ctx.hidden_width, ctx.hidden_layers, ctx.pad_t, ctx.act = int(hidden_width), int(hidden_layers), int(pad_t), int(activation)
 
         return outputTensor
 
@@ -50,19 +68,20 @@ class BilateralFilterFunctionNdEmbeddingGPU(torch.autograd.Function):
 
         grad_output = grad_output.contiguous()
         inputTensor, outputTensor, outputWeightsTensor, embedding = ctx.saved_tensors
-        hidden_width, hidden_layers, pad_t = ctx.hidden_width, ctx.hidden_layers, ctx.pad_t
-        grad_input, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, grad_embedding = bilateral_filter_nd_embedding_gpu_lib.backward_gpu(grad_output, inputTensor, outputTensor, outputWeightsTensor, *ctx.sigmas, embedding, hidden_width, hidden_layers, pad_t)
-        grad_sigmas = [torch.sum(d_s)
-                       for i, d_s in enumerate((dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z))]
-        
-        return (grad_input, grad_sigmas, grad_embedding, None, None, None)
+        hidden_width, hidden_layers, pad_t, act = ctx.hidden_width, ctx.hidden_layers, ctx.pad_t, ctx.act
+
+        grad_input, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, grad_embedding = bilateral_filter_nd_embedding_gpu_lib.backward_gpu(grad_output, inputTensor, outputTensor, outputWeightsTensor, *ctx.sigmas, embedding, hidden_width, hidden_layers, pad_t, act)
+        grad_sigmas = [torch.sum(d_s) if ctx.needs_input_grad[i + 1] else None
+                        for i, d_s in enumerate((dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z))]
+    
+        return (grad_input, *grad_sigmas, grad_embedding, None, None, None, None)
 
 
 class BilateralFilterNdEmbedding(torch.nn.Module):
     def __init__(self, axes=('t', 'x', 'y', 'z'),
                  sigma_t=0.0, sigma_x=0.0, sigma_y=0.0, sigma_z=0.0,
-                 hidden_width=16, hidden_layers=2, 
-                 pad_t=4, use_gpu=True):
+                 hidden_width=16, hidden_layers=2, activation="relu",
+                 pad_t=4, use_gpu=True, **kwargs):
 
         super().__init__()
 
@@ -83,6 +102,7 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
 
         self.hidden_width = int(hidden_width)
         self.hidden_layers = int(hidden_layers) - 1
+        self.activation = activation_to_key(activation)
 
         H = self.hidden_width
         L = self.hidden_layers
@@ -110,14 +130,14 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
 
 
     def parameter_groups(self, lr):
-        spatial = [getattr(self, f'sigma_{a}') for a in 'xyz' if isinstance(self, f'sigma_{a}', torch.nn.Parameter)]
+        spatial = [getattr(self, f'sigma_{a}') for a in 'xyz' if isinstance(getattr(self, f'sigma_{a}'), torch.nn.Parameter)]
         temporal = [self.sigma_t] if isinstance(self.sigma_t, torch.nn.Parameter) else []
         embedding = list(self.range_net.parameters())
 
         return [
             {'name': 'spatial', 'params': spatial, 'lr': lr['spatial'], 'weight_decay': 0.0},
             {'name': 'temporal', 'params': temporal, 'lr': lr['temporal'], 'weight_decay': 0.0},
-            {'name': 'embedding', 'params': embedding, 'lr': lr['embedding'], 'weight_decay': 1e-5},
+            {'name': 'embedding', 'params': embedding, 'lr': lr['embedding'], 'weight_decay': 0.0},
         ]
 
     def _get_sigmas(self):
@@ -133,7 +153,7 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
         
 
         if self.use_gpu:
-            output = BilateralFilterFunctionNdEmbeddingGPU.apply(x, *self._get_sigmas(), embedding, self.hidden_width, self.hidden_layers, self.pad_t)
+            output = BilateralFilterFunctionNdEmbeddingGPU.apply(x, *self._get_sigmas(), embedding, self.hidden_width, self.hidden_layers, self.activation, self.pad_t)
         else:
             raise NotImplementedError('CPU is not supported')
 
@@ -145,5 +165,5 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
         s = ' '.join(f'sigma_{a}: {float(getattr(self, f"sigma_{a}")):.4f}' for a in 'txyz')
         numel = sum(p.numel() for p in self.range_net.parameters())
         return (f'BilateralFilterNdEmbedding({s} range net: 2 -> {self.hidden_width} x {self.hidden_layers + 1} -> 1, '
-                f'{numel} weights')   
+                f'{numel} weights)')
                 

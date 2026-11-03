@@ -8,7 +8,7 @@ PYTHON="${PYTHON:-python}"
 echo ${PYTHON}
 failed=()
 GPU=3
-PACKAGES=(BilateralFilterND BilateralFilterNDLUT BilateralFilterNDKernel BilateralFilterNDKernelLUT BilateralFilter4DWeightedCenter)
+PACKAGES=(BilateralFilterNDEmbedding)
 
 echo "root:   $ROOT"
 echo "python: $PYTHON   gpu: $GPU"

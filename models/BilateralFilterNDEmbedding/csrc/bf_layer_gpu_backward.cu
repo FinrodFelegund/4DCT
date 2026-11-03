@@ -29,6 +29,7 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
                                                   const scalar_t* __restrict__ outputTensor,
                                                   const scalar_t* __restrict__ outputWeightsTensor,
                                                   const scalar_t* __restrict__ weightsTensor,
+                                                  int nParams,
                                                   scalar_t* gradientOutputTensor,
                                                   scalar_t* dL_dsigma_t,
                                                   scalar_t* dL_dsigma_x,
@@ -36,114 +37,160 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
                                                   scalar_t* dL_dsigma_z,
                                                   scalar_t* dL_dweights){
 
+    //since both the gradients with respect to the MLP weights are all writing in same memory adresses we give each block its private copy of the weights
+    // and accumulate the gradients after each kernel finishes
+
+    extern __shared__ unsigned char smemRaw[];
+    scalar_t* sParams = reinterpret_cast<scalar_t*>(smemRaw);
+    scalar_t* sGrad = sParams + nParams;
+    for(int i = threadIdx.x; i < nParams; i += blockDim.x){
+        sParams[i] = weightsTensor[i];
+        sGrad[i] = (scalar_t)0;
+    }
+    __syncthreads();
+
 
     const int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
     const int batchOffset = blockIdx.y * cBatchStrideBack;
 
     const bool active = homeOffset < cColorStrideBack;
+    const int homeOffsetSafe = active ? homeOffset : 0;
+    const int home = homeOffsetSafe + batchOffset;
   
-    if(active){
-        int homeT = homeOffset / cStridesBack[0];
-        int homeX = (homeOffset - homeT * cStridesBack[0]) / cStridesBack[1];
-        int homeY = (homeOffset - homeT * cStridesBack[1] - homeX * cStridesBack[1]) / cStridesBack[2];
-        int homeZ = (homeOffset - homeT * cStridesBack[1] - homeX * cStridesBack[1] - homeY * cStridesBack[2]) / cStridesBack[3];
-        int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
-        const bool homePadded = homeT < cPadTBack || homeT >= (cSizesBack[0] - cPadTBack);
-        const Embedding<scalar_t, H, L, ACT> network(weightsTensor);
+    int homeT = homeOffsetSafe / cStridesBack[0];
+    int homeX = (homeOffsetSafe - homeT * cStridesBack[0]) / cStridesBack[1];
+    int homeY = (homeOffsetSafe - homeT * cStridesBack[0] - homeX * cStridesBack[1]) / cStridesBack[2];
+    int homeZ = (homeOffsetSafe - homeT * cStridesBack[0] - homeX * cStridesBack[1] - homeY * cStridesBack[2]) / cStridesBack[3];
+    int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
-        const int home = homeOffset + batchOffset;
-        const scalar_t homeValue = inputTensor[home];
-        const scalar_t W_k = outputWeightsTensor[home];
-        const scalar_t O_k = outputTensor[home];
-        const scalar_t g_k = gradientInputTensor[home];
+    const bool homePadded = homeT < cPadTBack || homeT >= (cSizesBack[0] - cPadTBack);
 
-        const int halfT = cHalfWindowSizesBack[0], halfX = cHalfWindowSizesBack[1];
-        const int halfY = cHalfWindowSizesBack[2], halfZ = cHalfWindowSizesBack[3];
+    const Embedding<scalar_t, H, L, ACT> network(sParams);
+    const scalar_t homeValue = inputTensor[home];
+    const scalar_t W_k = outputWeightsTensor[home];
+    const scalar_t O_k = outputTensor[home];
+    const scalar_t g_k = gradientInputTensor[home];
 
-        const bool learnT = cKernelSizesBack[0] > 0, learnX = cKernelSizesBack[1] > 0;
-        const bool learnY = cKernelSizesBack[2] > 0, learnZ = cKernelSizesBack[3] > 0;
+    const bool contributes = active && !homePadded && g_k != (scalar_t)0;
 
-        const scalar_t invT3 = learnT ? (scalar_t)1 / ((scalar_t)cSigmasBack[0] * cSigmasBack[0] * cSigmasBack[0]);
-        const scalar_t invX3 = learnX ? (scalar_t)1 / ((scalar_t)cSigmasBack[1] * cSigmasBack[1] * cSigmasBack[1]);
-        const scalar_t invY3 = learnY ? (scalar_t)1 / ((scalar_t)cSigmasBack[2] * cSigmasBack[2] * cSigmasBack[2]);
-        const scalar_t invZ3 = learnZ ? (scalar_t)1 / ((scalar_t)cSigmasBack[3] * cSigmasBack[3] * cSigmasBack[3]);
+    const int halfT = cHalfWindowSizesBack[0], halfX = cHalfWindowSizesBack[1];
+    const int halfY = cHalfWindowSizesBack[2], halfZ = cHalfWindowSizesBack[3];
 
-        scalar_t dw_dx_ki = 0;
-        scalar_t tSum_w = 0, xSum_w = 0, ySum_w = 0, zSum_w = 0;
-        scalar_t tSum_alpha = 0, xSum_alpha = 0, ySum_alpha = 0, zSum_alpha = 0;
+    const bool learnT = cKernelSizesBack[0] > 1, learnX = cKernelSizesBack[1] > 1;
+    const bool learnY = cKernelSizesBack[2] > 1, learnZ = cKernelSizesBack[3] > 1;
 
-        scalar_t homePart[H];
-        embeddingHome<scalar_t, H, L, ACT>(network, homeValue, homePart);
+    const scalar_t invT3 = learnT ? (scalar_t)1 / ((scalar_t)cSigmasBack[0] * cSigmasBack[0] * cSigmasBack[0]) : 0;
+    const scalar_t invX3 = learnX ? (scalar_t)1 / ((scalar_t)cSigmasBack[1] * cSigmasBack[1] * cSigmasBack[1]) : 0;
+    const scalar_t invY3 = learnY ? (scalar_t)1 / ((scalar_t)cSigmasBack[2] * cSigmasBack[2] * cSigmasBack[2]) : 0;
+    const scalar_t invZ3 = learnZ ? (scalar_t)1 / ((scalar_t)cSigmasBack[3] * cSigmasBack[3] * cSigmasBack[3]) : 0;
+
+    scalar_t valueSum = 0;
+    scalar_t tSum_w = 0, xSum_w = 0, ySum_w = 0, zSum_w = 0;
+    scalar_t tSum_alpha = 0, xSum_alpha = 0, ySum_alpha = 0, zSum_alpha = 0;
+
+    scalar_t homePart[H];
+    embeddingHome<scalar_t, H, L, ACT>(network, homeValue, homePart);
+
+    if(__any_sync(0xffffffff, contributes)){
 
         for(int kernelT = 0; kernelT < cKernelSizesBack[0]; kernelT++){
             const int neighbourT = homeT + kernelT - halfT;
-            const bool neighbourTPadded = neighbourT < cPadTBack || neighbourT >= (cSizesBack[0] - cPadTBack);
-            if(neighbourT < 0 || neighbourT >= cSizes[0] || homePadded || neighbourTPadded){
+            const bool validT = contributes && neighbourT >= 0 && neighbourT < cSizesBack[0];
+            if(!__any_sync(0xffffffff, validT)){
                 continue;
             }
+            const int clampedT = min(max(neighbourT, 0), cSizesBack[0] - 1);
             const scalar_t gaussianT = cGaussianKernelBack[0][kernelT];
-
+    
             for(int kernelX = 0; kernelX < cKernelSizesBack[1]; kernelX++){
                 const int neighbourX = homeX + kernelX - halfX;
-                if(neighbourX < 0 || neighbourX >= cSizesBack[1]){
+                const bool validX = validT && neighbourX >= 0 && neighbourX < cSizesBack[1];
+                if(!__any_sync(0xffffffff, validX)){
                     continue;
                 }
+                const int clampedX = min(max(neighbourX, 0), cSizesBack[1] - 1);
                 const scalar_t gaussianX = cGaussianKernelBack[1][kernelX];
-
+    
                 for(int kernelY = 0; kernelY < cKernelSizesBack[2]; kernelY++){
                     const int neighbourY = homeY + kernelY - halfY;
-                    if(neighbourY < 0 || neighbourY >= cSizesBack[2]){
+                    const bool validY = validX  && neighbourY >= 0 && neighbourY < cSizesBack[2];
+                    if(!__any_sync(0xffffffff, validY)){
                         continue;
                     }
+                    const int clampedY = min(max(neighbourY, 0), cSizesBack[2] - 1);
                     const scalar_t gaussianY = cGaussianKernelBack[2][kernelY];
-
+    
                     for(int kernelZ = 0; kernelZ < cKernelSizesBack[3]; kernelZ++){
                         const int neighbourZ = homeZ + kernelZ - halfZ;
-                        if(neighbourZ < 0 || neighbourZ >= cSizesBack[3]){
+                        const bool valid = validY && neighbourZ >= 0 && neighbourZ < cSizesBack[3];
+                        if(!__any_sync(0xffffffff, valid)){
                             continue;
                         }
+                        const int clampedZ = min(max(neighbourZ, 0), cSizesBack[3] - 1);
                         const scalar_t gaussianZ = cGaussianKernelBack[3][kernelZ];
-
-                        int neighbourOffset = neighbourT * cStridesBack[0] + neighbourX * cStridesBack[1] + \
-                                              neighbourY * cStridesBack[2] + neighbourZ;
-                                    
-                        const bool isCenter = (kernelT == halfT) && (kernelX == halfX) && (kernelY == halfY) && (kernelZ == halfZ);
-                        const scalar_t neighbour = neighbourOffset + batchOffset;
+                        const int neighbour = batchOffset + clampedT * cStridesBack[0] + clampedX * cStridesBack[1] + 
+                                              clampedY * cStridesBack[2] + clampedZ;
+                                              
                         const scalar_t neighbourValue = inputTensor[neighbour];
-                        const scalar_t W_i = outputWeightsTensor[neighbour];
-                        const scalar_t O_i = outputTensor[neighbour];
-                        const scalar_t g_i = gradientInputTensor[neighbour];
-
-                        //dL / dsigma
-                        const scalar_t wt = W_i * cDistanceSquaredBack[0][kernelT] * invT3;
-                        const scalar_t wx = W_i * cDistanceSquaredBack[1][kernelX] * invY3;
-                        const scalar_t wy = W_i * cDistanceSquaredBack[2][kernelY] * invX3;
-                        const scalar_t wz = W_i * cDistanceSquaredBack[3][kernelZ] * invZ3;
-
-                        tSum_w += wt, tSum_alpha += wt * neighbourValue;
-                        xSum_w += wx, xSum_alpha += wx * neighbourValue;
-                        ySum_w += wy, ySum_alpha += wy * neighbourValue;
-                        zSum_w += wz, zSum_alpha += wz * neighbourValue;
-
-                        //dL / d(weights and biases) of the embedding
+                                    
                         scalar_t layerRegister[L + 1][H];
                         scalar_t colorWeight = embeddingForwardRegistered<scalar_t, H, L, ACT>(network, homePart, neighbourValue, layerRegister);
                         scalar_t spatialWeight = gaussianT * gaussianX * gaussianY * gaussianZ;
+                        scalar_t totalWeight = spatialWeight * colorWeight;
+    
+                        //dL / dsigma
+                        if(valid){
+                            const scalar_t wt = totalWeight * cDistanceSquaredBack[0][kernelT] * invT3;
+                            const scalar_t wx = totalWeight * cDistanceSquaredBack[1][kernelX] * invX3;
+                            const scalar_t wy = totalWeight * cDistanceSquaredBack[2][kernelY] * invY3;
+                            const scalar_t wz = totalWeight * cDistanceSquaredBack[3][kernelZ] * invZ3;
+        
+                            tSum_w += wt, tSum_alpha += wt * neighbourValue;
+                            xSum_w += wx, xSum_alpha += wx * neighbourValue;
+                            ySum_w += wy, ySum_alpha += wy * neighbourValue;
+                            zSum_w += wz, zSum_alpha += wz * neighbourValue;
+                        }
+    
+                        //dL / d(weights and biases) of the embedding
                         //dY_k/dz_out
-                        scalar_t dcolorWeight = (1 / W_k) * (neighbourValue - O_k) * spatialWeight * g_k;
-                        embeddingBackward<scalar_t, H, L, ACT>(network, dcolorWeight, layerRegister, dL_dweights);
-
-
+                        scalar_t dcolorWeight = valid ? (1 / W_k * (-O_k) * spatialWeight + 1 / W_k * neighbourValue * spatialWeight) * g_k : (scalar_t)0;
+                
+                        scalar_t embeddingInput[2] = { homeValue, neighbourValue };
+                        scalar_t embeddingInputGradient[2] = { (scalar_t)0 };
+                        embeddingBackward<scalar_t, H, L, ACT>(network, embeddingInput, embeddingInputGradient, dcolorWeight, colorWeight, layerRegister, sGrad);
+    
+                        //dL/dX_k if k is the home voxel
+                        //case m = k, meaning we take derivative with respect to home Voxel, at center we do this also for the second input to the filters
+                        if(valid){
+                            valueSum += embeddingInputGradient[0];
+                            //atomic cause this neighbour voxel is homevoxel in a different thread
+                            atomicAdd(&gradientOutputTensor[neighbour], embeddingInputGradient[1] + totalWeight * g_k * 1 / W_k);
+                        }
                     }
                 }
             }
         }
-        dL_dsigma_t[home] = (1 / W) * (tSum_alpha - O_k * tSum_w) * g_k;
-        dL_dsigma_x[home] = (1 / W) * (xSum_alpha - O_k * xSum_w) * g_k;
-        dL_dsigma_y[home] = (1 / W) * (ySum_alpha - O_k * ySum_w) * g_k;
-        dL_dsigma_z[home] = (1 / W) * (zSum_alpha - O_k * zSum_w) * g_k; 
     }
+
+    if(contributes){
+        dL_dsigma_t[home] = (1 / W_k) * (tSum_alpha - O_k * tSum_w) * g_k;
+        dL_dsigma_x[home] = (1 / W_k) * (xSum_alpha - O_k * xSum_w) * g_k;
+        dL_dsigma_y[home] = (1 / W_k) * (ySum_alpha - O_k * ySum_w) * g_k;
+        dL_dsigma_z[home] = (1 / W_k) * (zSum_alpha - O_k * zSum_w) * g_k;
+        //atomic cause this home voxel is neighbour voxel in a different thread
+        atomicAdd(&gradientOutputTensor[home], valueSum);
+    }
+
+    //global flush of blocks network gradient
+    __syncthreads();
+    for(int i = threadIdx.x; i < nParams; i += blockDim.x){
+        const scalar_t v = sGrad[i];
+        if(v != (scalar_t)0){
+            atomicAdd(&dL_dweights[i], v);
+        }
+    }
+    
 
 }
 
@@ -189,7 +236,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor, torc
     float distanceSquaredKernel[4][MAX_WINDOW] = {};
 
     for(int i = 0; i < 4; i++){
-        for(int j = 0; j < windowSize[i]; j++){
+        for(int j = 0; j < windowSizes[i]; j++){
             int distance = j - halfWindowSizes[i];
             gaussianKernel[i][j] = exp(distance * distance * spatialExpConstant[i]);
             distanceSquaredKernel[i][j] = distance * distance;
@@ -213,27 +260,32 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor, torc
 
     const int blockSize = 128;
     const dim3 grid((desc.channelStride + blockSize - 1) / blockSize, desc.batchCount);
+    const int nParams = (int)weights.numel();
 
+#define LAUNCH(HW, HL, ACT)                                                                     \
+    case (HW) * 100 + (HL) * 10 + (ACT):                                                        \
+        BilateralFilterCudaKernelBackward<scalar_t, HW, HL, ACT><<<grid, blockSize, smem>>>(    \
+            gradientInputTensor.data_ptr<scalar_t>(),                                           \
+            inputTensor.data_ptr<scalar_t>(),                                                   \
+            outputTensor.data_ptr<scalar_t>(),                                                  \
+            outputWeightsTensor.data_ptr<scalar_t>(),                                           \
+            weights.data_ptr<scalar_t>(),                                                       \
+            nParams,                                                                            \
+            gradientOutputTensor.data_ptr<scalar_t>(),                                          \
+            dL_dsig_t.data_ptr<scalar_t>(),                                                     \
+            dL_dsig_x.data_ptr<scalar_t>(),                                                     \
+            dL_dsig_y.data_ptr<scalar_t>(),                                                     \
+            dL_dsig_z.data_ptr<scalar_t>(),                                                     \
+            dL_dweights.data_ptr<scalar_t>());                                                  \
+        break;
     AT_DISPATCH_FLOATING_TYPES(
         inputTensor.scalar_type(), "BilateralFilterCudaKernelBackward", ([&] {
 
-#define LAUNCH(HW, HL, ACT)                                                                      \
-            case (HW) * 100 + (HL) + (ACT):                                                         \
-                BilateralFilterCudaKernelBackward<scalar_t, HW, HL, ACT><<<grid, blockSize>>>(   \
-                    gradientInputTensor.data_ptr<scalar_t>(),                               \
-                    inputTensor.data_ptr<scalar_t>(),                                       \
-                    outputTensor.data_ptr<scalar_t>(),                                      \
-                    outputWeightsTensor.data_ptr<scalar_t>(),                               \
-                    weights.data_ptr<scalar_t>(),                                           \
-                    gradientOutputTensor.data_ptr<scalar_t>(),                              \
-                    dL_dsig_t.data_ptr<scalar_t>(),                                         \
-                    dL_dsig_x.data_ptr<scalar_t>(),                                         \
-                    dL_dsig_y.data_ptr<scalar_t>(),                                         \
-                    dL_dsig_z.data_ptr<scalar_t>(),                                         \
-                    dL_dweights.data_ptr<scalar_t>());                                      \
-                break;
+            const size_t smem = 2 * (size_t)nParams * sizeof(scalar_t);
+            TORCH_CHECK(smem <= 49152, "network too large for shared memory (", smem, " bytes)");
 
-            switch(hiddenWidth * 100 + hiddenLength + act){
+
+            switch(hiddenWidth * 100 + hiddenLength * 10 + act){
                 LAUNCH(8, 0, 0) LAUNCH(8, 1, 0) LAUNCH(8, 2, 0) LAUNCH(8, 3, 0)
                 LAUNCH(16, 0, 0) LAUNCH(16, 1, 0) LAUNCH(16, 2, 0) LAUNCH(16, 3, 0)
 
@@ -254,9 +306,9 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor, torc
                 
                 default: TORCH_CHECK(false, "unsupported network: width ", hiddenWidth, ", ", hiddenLength, " hidden H x H layers");
             }
+        }));
+        
 #undef LAUNCH
-    }));
-
 
     cuda_error_check("Cuda check after kernel call");
 }

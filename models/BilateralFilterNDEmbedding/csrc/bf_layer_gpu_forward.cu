@@ -30,7 +30,15 @@ template <typename scalar_t, int H, int L, int ACT>
 __global__ void BilateralFilterCudaKernelForward(const scalar_t* __restrict__ inputTensor,
                                                  const scalar_t* __restrict__ weightsTensor,
                                                  scalar_t* outputTensor,
-                                                 scalar_t* outputWeightsTensor){
+                                                 scalar_t* outputWeightsTensor,
+                                                 int nParams){
+
+    extern __shared__ unsigned char smemRaw[];
+    scalar_t* sParams = reinterpret_cast<scalar_t*>(smemRaw);
+    for(int i = threadIdx.x; i < nParams; i += blockDim.x){
+        sParams[i] = weightsTensor[i];
+    }
+    __syncthreads();
     
     int homeOffset = blockIdx.x * blockDim.x + threadIdx.x;
     int batchOffset = blockIdx.y * cBatchStride;
@@ -47,7 +55,7 @@ __global__ void BilateralFilterCudaKernelForward(const scalar_t* __restrict__ in
         return;
     }
 
-    const Embedding<scalar_t, H, L, ACT> network(weightsTensor);
+    const Embedding<scalar_t, H, L, ACT> network(sParams);
 
     int homeX = (homeOffset - homeT * cStrides[0]) / cStrides[1];
     int homeY = (homeOffset - homeT * cStrides[0] - homeX * cStrides[1]) / cStrides[2];
@@ -149,7 +157,7 @@ void BilateralFilterForwardFunction(torch::Tensor inputTensor,
     spatialExpConstant[2] = sigma_y ? -1.0 / (2 * sigma_y * sigma_y) : 1;
     spatialExpConstant[3] = sigma_z ? -1.0 / (2 * sigma_z * sigma_z) : 1;
 
-    int* kernelSizes = new int[desc.dimensions];
+    int kernelSizes[4];
     kernelSizes[0] = windowSize[0];
     kernelSizes[1] = windowSize[1];
     kernelSizes[2] = windowSize[2];
@@ -178,20 +186,25 @@ void BilateralFilterForwardFunction(torch::Tensor inputTensor,
     
     const int blockSize = 128;
     const dim3 grid((desc.channelStride + blockSize - 1) / blockSize, desc.batchCount);
+    const int nParams = (int)weights.numel();
+
+#define LAUNCH(HW, HL, ACT)                                                                         \
+    case (HW) * 100 + (HL) * 10 + (ACT):                                                    \
+        BilateralFilterCudaKernelForward<scalar_t, HW, HL, ACT><<<grid, blockSize, smem>>>( \
+            inputTensor.data_ptr<scalar_t>(),                                               \
+            weights.data_ptr<scalar_t>(),                                                   \
+            outputTensor.data_ptr<scalar_t>(),                                              \
+            outputWeightsTensor.data_ptr<scalar_t>(),                                       \
+            nParams);                                                                       \
+        break;
 
     AT_DISPATCH_FLOATING_TYPES(
         inputTensor.scalar_type(), "BilateralFilterCudaKernelForward", ([&] {
+            const size_t smem = (size_t)nParams * sizeof(scalar_t);
+            TORCH_CHECK(smem <= 49152, "network too large for shared memory (", smem, " bytes)");
 
-#define LAUNCH(HW, HL, ACT)                                                             \
-            case (HW) * 100 + (HL) + (ACT):                                                     \
-                BilateralFilterCudaKernelForward<scalar_t, HW, HL, ACT><<<grid, blockSize>>>(    \
-                    inputTensor.data_ptr<scalar_t>(),                                   \
-                    weights.data_ptr<scalar_t>(),                                       \
-                    outputTensor.data_ptr<scalar_t>(),                                  \
-                    outputWeightsTensor.data_ptr<scalar_t>());                          \
-                break;
             
-            switch(hiddenWidth * 100 + hiddenLength + act){
+            switch(hiddenWidth * 100 + hiddenLength * 10 + act){
                 LAUNCH(8, 0, 0) LAUNCH(8, 1, 0) LAUNCH(8, 2, 0) LAUNCH(8, 3, 0)
                 LAUNCH(16, 0, 0) LAUNCH(16, 1, 0) LAUNCH(16, 2, 0) LAUNCH(16, 3, 0)
 
@@ -211,15 +224,11 @@ void BilateralFilterForwardFunction(torch::Tensor inputTensor,
                 LAUNCH(16, 0, 5) LAUNCH(16, 1, 5) LAUNCH(16, 2, 5) LAUNCH(16, 3, 5)
                 default: TORCH_CHECK(false, "unsupported network: width ", hiddenWidth, ", ", hiddenLength, " hidden H x H layers");
             }
-#undef LAUNCH
         }));
-
-
+    
+#undef LAUNCH
 
     cuda_error_check("Cuda check after kernel call");
-
-  delete[] kernelSizes;
-
 }
 
 std::tuple<torch::Tensor, torch::Tensor>BilateralFilterCudaForward(torch::Tensor inputTensor,

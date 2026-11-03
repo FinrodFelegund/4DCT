@@ -57,6 +57,10 @@ CALIBRATION_ROI_CENTERS = {
     '563_Lunge_amplitudebased': (67, 241, 220),
 }
 
+SIEMENS_ROI_CENTERS = {
+    '100%Dosis': {98, 285, 221}
+}
+
 def roi_from_centre(d, r, c, size_z=8, size_xy=12):
     return (
         d - size_z // 2, d - size_z // 2 + size_z,
@@ -66,3 +70,4 @@ def roi_from_centre(d, r, c, size_z=8, size_xy=12):
 
 AORTA_ROI = {s: roi_from_centre(*c) for s, c in TEST_ROI_CENTERS.items()}
 CALIBRATION_ROI = {s: roi_from_centre(*c) for s, c in CALIBRATION_ROI_CENTERS.items()}
+SIEMENS_ROI = {s: roi_from_centre(*c) for s, c in SIEMENS_ROI_CENTERS.items()}

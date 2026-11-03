@@ -17,7 +17,7 @@ setup(
     ext_modules=[
         CUDAExtension('bilateral_filter_nd_embedding_gpu_lib', [
             'csrc/bilateralfilter_gpu.cu',
-            'csrc/bf_layer_gpu_foward.cu',
+            'csrc/bf_layer_gpu_forward.cu',
             'csrc/bf_layer_gpu_backward.cu'
         ],
         include_dirs=['utils', 'csrc'],),

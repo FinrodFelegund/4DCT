@@ -1,0 +1,18 @@
+name: BFEmb_xyzt-xyzt-xyzt
+train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
+parameter_dir: /home/dpietsch/4DCT/parameters
+epochs: 200
+amp: false
+validate_every: 8
+model:
+  stages:
+    - type: ndembedding
+      count: 3
+      params: [
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: leakyrelu},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: leakyrelu},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: leakyrelu},
+      ]
+optim: {lr_sp: 0.01, lr_t: 0.01, lr_embedding: 0.001}
+clamp: {sigma_min: 0.01, sigma_max: 2.0}
+crop: {patch_size: [32, 64, 64], margin: [8, 8, 8], num_crops_train: 16, num_crops_validation: 8}

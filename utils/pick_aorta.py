@@ -9,11 +9,12 @@ import nibabel as nib
 from data.dataset import CTValidationDataset
 
 from test_models import HU_MIN, HU_MAX, HU_RANGE, PHASE_INDEX
-from utils.rois import AORTA_ROI, CALIBRATION_ROI
+from utils.rois import AORTA_ROI, CALIBRATION_ROI, SIEMENS_ROI
 
 DATA = {
     'train': ('/home/dpietsch/Data/.cache/Inhouse1Processed_v3', '/home/dpietsch/Data/Inhouse1', CALIBRATION_ROI),
     'test':  ('/home/dpietsch/Data/.cache/Inhouse2Processed_v3', '/home/dpietsch/Data/Inhouse2', AORTA_ROI),
+    'siemens': ('', '/home/dpietsch/Data/100%Dosis', SIEMENS_ROI)
 } 
 
 OUT = Path('explorations/roi_picking')

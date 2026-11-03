@@ -337,3 +337,5 @@ std::tuple<torch::Tensor, torch::Tensor> BilateralFilterCudaBackward(torch::Tens
     return {gradientOutputTensor, gradLutTensor};
                                                                      
 }
+
+
