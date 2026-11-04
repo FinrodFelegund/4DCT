@@ -1,4 +1,8 @@
+from typing import Dict
+
 import torch
+
+from models.base import DenoisingModel
 
 def _spatial3d(**kwargs):
     from bilateral_filter_layer_3d import BilateralFilter3d
@@ -48,7 +52,12 @@ STAGE_BUILDERS = {
     'ndembedding': _ndembedding,
 }
 
-class FilterBank(torch.nn.Module):
+RANGE_SUFFIXES = ('color_sigma', 'sigma_r')
+CENTER_SUFFIXES = ('center_alpha',)
+KERNEL_SUFFIXES = ('kernel',)
+UNCONSTRAINED_SUFFIXES = ('raw_lut', 'lut')
+
+class FilterBank(DenoisingModel):
     def __init__(self, stages):
         super().__init__()
         built, names = [], []
@@ -67,12 +76,28 @@ class FilterBank(torch.nn.Module):
             raise ValueError('Config declares no stages.')
         self.stages = torch.nn.ModuleList(built)
         self.stage_names = names
+        self.supports_half_precision = all(getattr(s, 'supports_half_precision', False) for s in built)
 
     def forward(self, x):
         for stage in self.stages:
             x = stage(x)
         return x
 
+    def parameter_groups(self, lr):
+        groups = []
+        for stage_name, stage in zip(self.stage_names, self.stages):
+            if not hasattr(stage, 'parameter_groups'):
+                raise TypeError(f'{stage_name}: {type(stage).__name__} has no parameter_groups(lr) function')
+            for group in stage.parameter_groups(lr):
+                groups.append({**group, 'name': f'{stage_name}/{group['name']}'})
+        return groups
+
+    def regularisation(self):
+        penalties = [stage.lut_smoothness_penalty() for stage in self.stages
+                     if hasattr(stage, 'lut_smoothness_penalty')]
+
+        return sum(penalties) if penalties else None
+    
     def scalar_parameters(self):
         out = {}
         for name, stage in zip(self.stage_names, self.stages):
@@ -82,39 +107,30 @@ class FilterBank(torch.nn.Module):
 
         return out
 
-    def regularisation(self):
-        total = None
-        for stage in self.stages:
-            penalty_fn = getattr(stage, 'lut_smoothness_penalty', None)
-            if penalty_fn is None:
+
+
+    @torch.no_grad()
+    def clamp_(self, limits: Dict):
+        sigma = (limits.get('sigma_min', 0.01), limits.get('sigma_max', 2.0))
+        colour = (limits.get('range_min', 1e-4), limits.get('range_max', 2.0))
+        centre = (limits.get('center_min', 0.0), limits.get('center_max', 10.0))
+        kernel_min = limits.get('kernel_min', 0.0)
+
+        for name, param in self.named_parameters():
+            leaf = name.rsplit('.', 1)[-1]
+            # log-parametrised values, LUTs and the range network are free
+            if leaf.startswith('log_') or '.range_net.' in f'.{name}' or name.endswith(UNCONSTRAINED_SUFFIXES):
                 continue
-            
-            penalty = penalty_fn()
-            total = penalty if total is None else total + penalty
-
-        return total
-
-    def parameter_groups(self, lr):
-        groups = []
-        for stage_name, stage in zip(self.stage_names, self.stages):
-            if not hasattr(stage, 'parameter_groups'):
-                raise TypeError(f'{stage_name}: {type(stage).__name__} has no parameter_groups(lr) function')
-            for group in stage.parameter_groups(lr):
-                if group['params']:
-                    groups.append({**group, 'name': f'{stage_name}/{group['name']}'})
-
-        grouped = [id(p) for g in groups for p in g['params']]
-        if len(grouped) != len(set(grouped)):
-            raise ValueError('a parameter appears in more than one optimizer group')
-        missing = [n for n, p in self.named_parameters() if p.requires_grad and id(p) not in set(grouped)]
-        if missing:
-            raise ValueError(f'trainable parameters without an optimizer group: {missing}')
-
-        return groups
+            if name.endswith(RANGE_SUFFIXES):
+                param.clamp_(*colour)
+            elif name.endswith(CENTER_SUFFIXES):
+                param.clamp_(*centre)
+            elif name.endswith(KERNEL_SUFFIXES):
+                param.clamp_(min=kernel_min)
+            else:
+                param.clamp_(*sigma)
 
     def __repr__(self):
-        for stage in self.stages:
-            print(stage)
-        return f'Filterbank({", ".join(self.stage_names)})'
+        return f'FilterBank({", ".join(self.stage_names)})\n' + '\n'.join(repr(s) for s in self.stages)
 
 

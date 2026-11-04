@@ -99,7 +99,7 @@ __global__ void BilateralFilterCudaKernelForward(const scalar_t* __restrict__ in
                     
             
                     const scalar_t neighbourValue = inputTensor[batchOffset + neighbourOffset];
-                    const scalar_t colorWeight = embeddingForward<scalar_t, H, L, ACT>(network, homePart, neighbourValue);
+                    const scalar_t colorWeight = embeddingForward<scalar_t, H, L, ACT>(network, homePart, homeValue, neighbourValue);
                     
                     const scalar_t spatialWeight = gaussianT * gaussianX * gaussianY * gaussianZ;
                     
@@ -136,20 +136,20 @@ void BilateralFilterForwardFunction(torch::Tensor inputTensor,
     
     TensorDescription desc = TensorDescription(inputTensor);
 
-    int windowSize[4];
-    windowSize[0] = sigma_t ? 9 : 1;
-    windowSize[1] = sigma_x ? std::max(((int)ceil(5.0f * sigma_x) | 1), 5) : 1;
-    windowSize[2] = sigma_y ? std::max(((int)ceil(5.0f * sigma_y) | 1), 5) : 1;
-    windowSize[3] = sigma_z ? std::max(((int)ceil(5.0f * sigma_z) | 1), 5) : 1;
+    int windowSizes[4];
+    windowSizes[0] = sigma_t ? 2 * pad_t + 1 : 1;
+    windowSizes[1] = sigma_x ? std::max(((int)ceil(5.0f * sigma_x) | 1), 5) : 1;
+    windowSizes[2] = sigma_y ? std::max(((int)ceil(5.0f * sigma_y) | 1), 5) : 1;
+    windowSizes[3] = sigma_z ? std::max(((int)ceil(5.0f * sigma_z) | 1), 5) : 1;
 
-    TORCH_CHECK(windowSize[1] <= MAX_WINDOW && windowSize[2] <= MAX_WINDOW && windowSize[3] <= MAX_WINDOW,
+    TORCH_CHECK(windowSizes[0] <= MAX_WINDOW && windowSizes[1] <= MAX_WINDOW && windowSizes[2] <= MAX_WINDOW && windowSizes[3] <= MAX_WINDOW,
                 "window size exceeds MAX_WINDOW (", MAX_WINDOW, ")");
 
     int halfWindowSizes[4];
-    halfWindowSizes[0] = floor(0.5f * windowSize[0]);
-    halfWindowSizes[1] = floor(0.5f * windowSize[1]);
-    halfWindowSizes[2] = floor(0.5f * windowSize[2]);
-    halfWindowSizes[3] = floor(0.5f * windowSize[3]);
+    halfWindowSizes[0] = floor(0.5f * windowSizes[0]);
+    halfWindowSizes[1] = floor(0.5f * windowSizes[1]);
+    halfWindowSizes[2] = floor(0.5f * windowSizes[2]);
+    halfWindowSizes[3] = floor(0.5f * windowSizes[3]);
     
     float spatialExpConstant[4];
     spatialExpConstant[0] = sigma_t ? -1.0 / (2 * sigma_t * sigma_t) : 1;
@@ -158,15 +158,15 @@ void BilateralFilterForwardFunction(torch::Tensor inputTensor,
     spatialExpConstant[3] = sigma_z ? -1.0 / (2 * sigma_z * sigma_z) : 1;
 
     int kernelSizes[4];
-    kernelSizes[0] = windowSize[0];
-    kernelSizes[1] = windowSize[1];
-    kernelSizes[2] = windowSize[2];
-    kernelSizes[3] = windowSize[3];
+    kernelSizes[0] = windowSizes[0];
+    kernelSizes[1] = windowSizes[1];
+    kernelSizes[2] = windowSizes[2];
+    kernelSizes[3] = windowSizes[3];
 
     float gaussianKernel[4][MAX_WINDOW] = {};
 
     for(int i = 0; i < 4; i++){
-        for(int j = 0; j < windowSize[i]; j++){
+        for(int j = 0; j < windowSizes[i]; j++){
             int distance = j - halfWindowSizes[i];
             gaussianKernel[i][j] = exp(distance * distance * spatialExpConstant[i]);
         }
@@ -249,7 +249,7 @@ std::tuple<torch::Tensor, torch::Tensor>BilateralFilterCudaForward(torch::Tensor
     TORCH_CHECK(inputTensor.dim() == 6, "inputTensor must be [B, C, T, X, Y, Z].");
     TORCH_CHECK(inputTensor.size(1) == 1, "only one channel images are supported");
     TORCH_CHECK(hiddenLength >= 0, "hiddenLength must be >= 0");
-    TORCH_CHECK(weights.dim() == 1 && weights.numel() == 4 * hiddenWidth + 1 + hiddenLength * (hiddenWidth * hiddenWidth + hiddenWidth),
+    TORCH_CHECK(weights.dim() == 1 && weights.numel() == 4 * hiddenWidth + hiddenWidth + hiddenLength * (hiddenWidth * hiddenWidth + hiddenWidth) + hiddenWidth + 1,
                 "weights must be flat network (W_in | b_in | W_hidden | b_hidden | W_out | b_out) for width ",
                 hiddenWidth, " and ", hiddenLength, " hidden H * H layers, got ", weights.numel(), " values");
 

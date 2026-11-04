@@ -5,7 +5,9 @@ Author: Fabian Wagner
 Contact: fabian.wagner@fau.de
 """
 
-from typing import List
+import math
+
+import warnings
 
 import torch
 import bilateral_filter_nd_embedding_gpu_lib
@@ -26,6 +28,14 @@ def unpad_circular_t(x: torch.Tensor, pad_t: int):
         return x
 
     return x[:, :, pad_t:-pad_t]
+
+def temporal_window(sigma_t: float, T: int):
+    if sigma_t <= 0:
+        return 1
+
+    window = max(math.ceil(5.0 * sigma_t) | 1, 5)
+    widest = T if T % 2 else T - 1
+    return min(window, widest)
 
 def activation_to_key(act: str):
     key = 0
@@ -70,18 +80,21 @@ class BilateralFilterFunctionNdEmbeddingGPU(torch.autograd.Function):
         inputTensor, outputTensor, outputWeightsTensor, embedding = ctx.saved_tensors
         hidden_width, hidden_layers, pad_t, act = ctx.hidden_width, ctx.hidden_layers, ctx.pad_t, ctx.act
 
-        grad_input, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, grad_embedding = bilateral_filter_nd_embedding_gpu_lib.backward_gpu(grad_output, inputTensor, outputTensor, outputWeightsTensor, *ctx.sigmas, embedding, hidden_width, hidden_layers, pad_t, act)
+        #skip gradient computation for the noisy input, to safe some time
+        compute_input_grad = bool(ctx.needs_input_grad[0])
+
+        grad_input, dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z, grad_embedding = bilateral_filter_nd_embedding_gpu_lib.backward_gpu(grad_output, inputTensor, outputTensor, outputWeightsTensor, *ctx.sigmas, embedding, hidden_width, hidden_layers, pad_t, act, compute_input_grad)
         grad_sigmas = [torch.sum(d_s) if ctx.needs_input_grad[i + 1] else None
                         for i, d_s in enumerate((dO_dsig_t, dO_dsig_x, dO_dsig_y, dO_dsig_z))]
     
-        return (grad_input, *grad_sigmas, grad_embedding, None, None, None, None)
+        return (grad_input if compute_input_grad else None, *grad_sigmas, grad_embedding, None, None, None, None)
 
 
 class BilateralFilterNdEmbedding(torch.nn.Module):
     def __init__(self, axes=('t', 'x', 'y', 'z'),
                  sigma_t=0.0, sigma_x=0.0, sigma_y=0.0, sigma_z=0.0,
                  hidden_width=16, hidden_layers=2, activation="relu",
-                 pad_t=4, use_gpu=True, **kwargs):
+                 diff_scale=40.0, use_gpu=True, **kwargs):
 
         super().__init__()
 
@@ -103,11 +116,12 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
         self.hidden_width = int(hidden_width)
         self.hidden_layers = int(hidden_layers) - 1
         self.activation = activation_to_key(activation)
+        self.diff_scale = float(diff_scale)
 
         H = self.hidden_width
         L = self.hidden_layers
         self.range_net = torch.nn.Sequential(
-            torch.nn.Linear(2, self.hidden_width),
+            torch.nn.Linear(4, self.hidden_width),
             *[torch.nn.Linear(H, H) for _ in range(L)],
             torch.nn.Linear(H, 1),
         )
@@ -116,12 +130,20 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
             self.range_net[-1].weight.zero_()
             self.range_net[-1].bias.fill_(1.0)
 
-        self.pad_t = pad_t if 't' in self.axes else 0
         self.use_gpu = use_gpu
+
+        if kwargs:
+            warnings.warn(f'Detected unknwon initialization arguments: {kwargs}')
+
+    def input_weights(self):
+        """Scale the input difference weights by a scale factor otherwise they will have negligable contribution on the gradients"""
+        scale = torch.ones(4, dtype=self.range_net[0].weight.dtype, device=self.range_net[0].weight.device)
+        scale[2] = self.diff_scale
+        return self.range_net[0].weight * scale
 
     def reshaped_parameters(self):
         first, hidden, last = self.range_net[0], self.range_net[1:-1], self.range_net[-1]
-        parts = [first.weight.reshape(-1), first.bias]
+        parts = [self.input_weights().reshape(-1), first.bias]
         if hidden:
             parts += [torch.stack([l.weight for l in hidden]).reshape(-1),
                       torch.stack([l.bias for l in hidden]).reshape(-1)]
@@ -148,22 +170,23 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
         assert x.shape[1] == 1, 'Currently only one channel images are supported'
 
         x = x.permute(0, 1, 2, 4, 5, 3).contiguous()
-        x = pad_circular_t(x, self.pad_t)
+        pad_t = temporal_window(float(self.sigma_t), x.shape[2]) // 2 if 't' in self.axes else 0
+        x = pad_circular_t(x, pad_t)
         embedding = self.reshaped_parameters().to(x.dtype)
         
 
         if self.use_gpu:
-            output = BilateralFilterFunctionNdEmbeddingGPU.apply(x, *self._get_sigmas(), embedding, self.hidden_width, self.hidden_layers, self.activation, self.pad_t)
+            output = BilateralFilterFunctionNdEmbeddingGPU.apply(x, *self._get_sigmas(), embedding, self.hidden_width, self.hidden_layers, self.activation, pad_t)
         else:
             raise NotImplementedError('CPU is not supported')
 
-        output = unpad_circular_t(output, self.pad_t)
+        output = unpad_circular_t(output, pad_t)
         output = output.permute(0, 1, 2, 5, 3, 4).contiguous()
         return output
 
     def __repr__(self):
         s = ' '.join(f'sigma_{a}: {float(getattr(self, f"sigma_{a}")):.4f}' for a in 'txyz')
         numel = sum(p.numel() for p in self.range_net.parameters())
-        return (f'BilateralFilterNdEmbedding({s} range net: 2 -> {self.hidden_width} x {self.hidden_layers + 1} -> 1, '
-                f'{numel} weights)')
+        return (f'BilateralFilterNdEmbedding({s} range net: 4 -> {self.hidden_width} x {self.hidden_layers + 1} -> 1, '
+                f'diff scale {self.diff_scale}, {numel} weights)')
                 

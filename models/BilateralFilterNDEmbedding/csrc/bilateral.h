@@ -35,5 +35,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
                                                                                                     int hiddenWidth,
                                                                                                     int nHidden,
                                                                                                     int pad_t,
-                                                                                                    int act);
+                                                                                                    int act,
+                                                                                                    bool computeInputGradient);
                                 

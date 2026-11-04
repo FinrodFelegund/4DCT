@@ -6,7 +6,7 @@ with open('README.rst') as f:
 
 
 setup(
-    name='bilaterfilterND_torch_embedding',
+    name='bilateralfilterND_torch_embedding',
     version='1.0.0',
     author='w/e',
     description='Trainable bilateral filter with spatio-temporal gaussian filter and intensity embedding feed forward',

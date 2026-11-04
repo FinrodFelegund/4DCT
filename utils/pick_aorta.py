@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+from glob import glob
 
 import cv2
 import numpy as np
@@ -14,7 +15,7 @@ from utils.rois import AORTA_ROI, CALIBRATION_ROI, SIEMENS_ROI
 DATA = {
     'train': ('/home/dpietsch/Data/.cache/Inhouse1Processed_v3', '/home/dpietsch/Data/Inhouse1', CALIBRATION_ROI),
     'test':  ('/home/dpietsch/Data/.cache/Inhouse2Processed_v3', '/home/dpietsch/Data/Inhouse2', AORTA_ROI),
-    'siemens': ('', '/home/dpietsch/Data/100%Dosis', SIEMENS_ROI)
+    'siemens': ('/home/dpietsch/Data/.cache/Siemens', '', SIEMENS_ROI)
 } 
 
 OUT = Path('explorations/roi_picking')
@@ -265,6 +266,29 @@ def main():
         pd.DataFrame(rows).to_csv(path, index=False)
         print(f'\nwrote {path} and {out}/*_candidates.png')
 
+def verify_scan():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--data', default='siemens')
+    args = parser.parse_args()
+
+    out = Path('/home/dpietsch/4DCT/explorations/Siemens')
+    out.mkdir(parents=True, exist_ok=True)
+    cache, _, table = DATA[args.data]
+    files = sorted(glob(f'{cache}/**/*.nii', recursive=True))
+
+    for file in files:
+        file_name = file.rsplit('/', 1)[-1].rsplit('.')[0]
+        d0, d1, r0, r1, c0, c1 = table[file_name]
+        scan = nib.load(file)
+        scan_array = np.asarray(scan.dataobj).astype(np.float32).transpose(2, 0, 1)
+        roi = scan_array[d0:d1, r0:r1, c0:c1]
+        print(f'{file_name}: mean {roi.mean():7.1f} HU   std {roi.std():6.1f} HU    '
+              f'range [{roi.min():.0f}, {roi.max():.0f}]')
+        render(scan_array[d0:d1].mean(axis=0), [(r0, c0)],
+               out / f'{file_name}_verify.png', labels=['chosen'])
+
+
+
 
 if __name__ == '__main__':
-    main()
+    verify_scan()

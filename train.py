@@ -1,6 +1,7 @@
 import os
 import warnings
 from typing import Dict
+import importlib
 
 import torch
 import wandb
@@ -10,10 +11,9 @@ from torchvision.utils import make_grid
 from tqdm import tqdm
 
 from data.dataset import CTTrainDataset, CTValidationDataset
-from models.filterbank import FilterBank
-from models.cnn import CNN
 from utils.processing import interior
-from utils.explore_sigmas import sweep_sigmas
+from models.model import Model
+from models.base import DenoisingModel
 
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
@@ -21,91 +21,87 @@ LUNG_LO, LUNG_HI = -1250.0, 250.0
 SOFT_LO, SOFT_HI = -160.0, 240.0
 def to_display(x, lo, hi):
     hu = x * 4024.0 - 1024.0
-    return ((hu - lo) / (hi - lo)).clamp(0.0, 1.0) 
+    return ((hu - lo) / (hi - lo)).clamp(0.0, 1.0)
 
-RANGE_SUFFIXES = ('color_sigma', 'sigma_r')
-LUT_SUFFIXES = ('raw_lut', 'lut')
-KERNEL_SUFFIXES = ('kernel', )
-CENTER_SUFFIXES = ('center_alpha',)
+def resolve_amp(config: Dict, model: DenoisingModel):
+    amp_cfg = config.get('amp', False)
+    if amp_cfg is False:
+        return None
 
-def group_of(name: str) -> str:
-    if name.endswith(RANGE_SUFFIXES):
-        return 'range'
-    if name.endswith(LUT_SUFFIXES):
-        return 'lut'
-    if name.endswith(KERNEL_SUFFIXES):
-        return 'kernel'
-    if name.endswith(CENTER_SUFFIXES):
-        return 'center'
-    return 'spatiotemporal'
+    if not model.supports_half_precision:
+        print(f'amp disabled for model {type(model)}. The model has not half-precision CUDA dispatch')
+        return None
+    
+    return {'float16': torch.float16, 'bfloat16': torch.bfloat16}[config.get('amp_dtype', 'float16')]
+
 
 def learning_rates(config):
-    optim_cfg = config.get('optim', {})
+    lr_cfg = config.get('learning_rates', {})
     return {
-        'spatial': optim_cfg.get('lr_sp', 0.01),
-        'temporal': optim_cfg.get('lr_t', 0.01),
-        'spatiotemporal': optim_cfg.get('lr_spt', 0.01),
-        'range': optim_cfg.get('lr_r', 0.005),
-        'center': optim_cfg.get('lr_center', 0.01),
-        'kernel': optim_cfg.get('lr_kernel', 1e-3),
-        'lut': optim_cfg.get('lr_lut', 1e-3),
-        'network': optim_cfg.get('lr_network', 1e-4),
-        'embedding': optim_cfg.get('lr_embedding', 1e-3)
+        'spatial': lr_cfg.get('lr_sp', 0.01),
+        'temporal': lr_cfg.get('lr_t', 0.01),
+        'spatiotemporal': lr_cfg.get('lr_spt', 0.01),
+        'range': lr_cfg.get('lr_r', 0.005),
+        'center': lr_cfg.get('lr_center', 0.01),
+        'kernel': lr_cfg.get('lr_kernel', 1e-3),
+        'lut': lr_cfg.get('lr_lut', 1e-3),
+        'network': lr_cfg.get('lr_network', 1e-4),
+        'embedding': lr_cfg.get('lr_embedding', 1e-3)
     }
 
-def build_optimizer(model, config):
-    lr = learning_rates(config)
-    groups = model.parameter_groups(lr)
+def build_optimizer(model: DenoisingModel, optimizer_config: Dict) -> torch.optim.Optimizer:
+    groups = model.optimizer_groups(learning_rates(optimizer_config))
     for g in groups:
         print(f'optimizer group {g['name']}: {sum(p.numel() for p in g['params'])} values, lr {g['lr']}')
-    return torch.optim.Adam(groups)
 
-@torch.no_grad()
-def clamp_parameters(model: torch.nn.Module, config: Dict):
-    clamp_cfg = config.get('clamp', {})
-    sigma_min = clamp_cfg.get('sigma_min', 0.01)
-    sigma_max = clamp_cfg.get('sigma_max', 2.0)
-    range_min = clamp_cfg.get('range_min', 1e-4)
-    range_max = clamp_cfg.get('range_max', 2.0)
-    center_min = clamp_cfg.get('center_min', 0.0)
-    center_max = clamp_cfg.get('center_max', 10.0)
-    kernel_min = clamp_cfg.get('kernel_min', 0.0)
+    optimizer = getattr(importlib.import_module('torch.optim'), optimizer_config.get('class'))
+    return optimizer(groups)
 
-    if isinstance(model, CNN):
-        return
+def build_scheduler(optimizer, scheduler_config: Dict) -> torch.optim.lr_scheduler.LRScheduler:
+    scheduler = getattr(importlib.import_module('torch.optim.lr_scheduler'), scheduler_config.get('class'))
+    return scheduler(optimizer, **scheduler_config.get('params'))
 
-    for name, param in model.named_parameters():
-        if name.rsplit('.', 1)[-1].startswith('log_'):
-            continue
-        if '.range_net.' in f'.{name}':
-            continue
-        group = group_of(name)
-        if group == 'range':
-            param.clamp_(min=range_min, max=range_max)
-        elif group == 'spatiotemporal':
-            param.clamp_(min=sigma_min, max=sigma_max)
-        elif group == 'center':
-            param.clamp_(min=center_min, max=center_max)
-        elif group == 'kernel':
-            param.clamp_(min=kernel_min)
-        elif group == 'skip':
-            continue
+def find_checkpoint(parameter_dir: str, source: str):
+    if source.endswith('.pth'):
+        return source
+    matches = [f for f in os.listdir(parameter_dir) if f.startswith(f'{source}_epoch') and f.endswith('.pth')]
+    if not matches:
+        raise FileNotFoundError(f'no checkpoint of run {source!r} in {parameter_dir}')
+    if len(matches) > 1:
+        raise RuntimeError(f'several checkpoints of run {source!r}, pass a .pth path instead: {sorted(matches)}')
+    return os.path.join(parameter_dir, matches[0])
+    
 
-def from_checkpoint(model, config, device):
-    if config.get('pretrained', False):
-        model_name = config.get('name')
-        param_dir = config.get('parameter_dir')
-        ckpt_files = os.listdir(param_dir)
-        ckpt = None
-        for file in ckpt_files:
-            if file.startswith(model_name):
-                ckpt = os.path.join(param_dir, file)
-                
+def build_model(config: Dict, device):
+    model = Model(config['model']['stages']).to(device)
+    optimizer = build_optimizer(model, config.get('optimizer'))
 
-        if ckpt is not None:
-            weights = torch.load(ckpt, map_location=device)
-            model.load_state_dict(weights['model'])
-            print('loaded pretrained model from: ', ckpt)
+    if not config.get('resume', False):
+        return model, optimizer
+
+    path = find_checkpoint(config.get('parameter_dir', ''), config.get('resume_from', '') or config.get('name'))
+    state = torch.load(path, map_location=device)
+    model.load_state_dict(state['model'])
+
+    if 'optimizer' not in state:
+        print(f'{path} has not optimizer state, continuing with fresh optimizer')
+    else:
+        saved = [g['name'] for g in state['optimizer']['param_groups']]
+        fresh = [g['name'] for g in optimizer.param_groups]
+
+        if saved != fresh:
+            raise ValueError(f'optimizer groups differ from checkpoint: {saved} vs {fresh}')
+
+        #config might have set different hyper params compared to saved state, use these instead
+        hyper = [{k: v for k, v in g.items() if k != 'params'} for g in optimizer.param_groups]
+        optimizer.load_state_dict(state['optimizer'])
+        for group, h in zip(optimizer.param_groups, hyper):
+            group.update(h)
+            group.pop('initial_lr', None)
+
+    print(f'resumed from {path}')
+    return model, optimizer
+
 
 def preview_grid(model, validation_dataset, device, crop=192):
     """Centre slice of ground truth, prediction and input, side by side."""
@@ -113,8 +109,7 @@ def preview_grid(model, validation_dataset, device, crop=192):
     H, W = clean.shape[-2:]
     y0, x0 = max((H - crop) // 2, 0), max((W - crop) // 2, 0)
     clean, noisy = clean[..., y0:y0 + crop, x0:x0 + crop].to(device), noisy[..., y0:y0 + crop, x0:x0 + crop].to(device)
-    forward = getattr(model, 'forward_volume', model)
-    pred = forward(noisy)
+    pred = model.forward_volume(noisy)
     t = pred.shape[2] // 2
     d = pred.shape[3] // 2
 
@@ -160,23 +155,6 @@ def validate(model, dataloader, dataset, criterion, psnr_metric, ssim_metric, de
             ssim_metric.compute().item(),
             grid_lung, grid_soft)
 
-def resolve_amp(config: Dict):
-    amp_cfg = config.get('amp', False)
-    if amp_cfg is False:
-        return None
-    
-    stage_types = {stage['type'] for stage in config['model']['stages']}
-    if stage_types & {'learnable_spt4d', 'lut4d', 'ndlut', 'nd'}:
-        print('amp disabled: a selected stage has no half-precision CUDA dispatch.')
-        return None
-    
-    return {'float16': torch.float16, 'bfloat16': torch.bfloat16}[
-        config.get('amp_dtype', 'float16')]
-
-def build(model, path, DEVICE):
-    params = torch.load(path, map_location=DEVICE)
-    model.load_state_dict(params)
-    return model
 
 def train(config: Dict):
     wandb.init(entity=config.get('wandb_entity', 'ipmi'),
@@ -184,13 +162,11 @@ def train(config: Dict):
                name=config['name'], config=config)
     
     device = torch.device('cuda')
-    model_cfg = config.get('model')
-    #if isinstance(model_cfg, dict):
-    #    model = CNN(model_cfg['stages']).to(device)
-    #else:
-    model = FilterBank(model_cfg['stages']).to(device)
-    from_checkpoint(model, config, device)
+    model, optimizer = build_model(config, device)
     print(model)
+    scheduler = build_scheduler(optimizer, config.get('scheduler'))
+    amp_dtype = resolve_amp(config, model)
+    scaler = torch.amp.GradScaler(device=device.type, enabled=amp_dtype == torch.float16)
 
     transform_params = config.get('crop')
     margin = transform_params.get('margin')
@@ -215,9 +191,7 @@ def train(config: Dict):
                                        num_workers=2, collate_fn=CTValidationDataset.collate_fn)
 
 
-    optimizer = build_optimizer(model, config)
-    amp_dtype = resolve_amp(config)
-    scaler = torch.amp.GradScaler(device=device.type, enabled=amp_dtype == torch.float16)
+
     criterion = torch.nn.HuberLoss().to(device)
     psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
     ssim_metric = StructuralSimilarityIndexMeasure(data_range=1.0).to(device)
@@ -254,7 +228,7 @@ def train(config: Dict):
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=clip_norm)
             scaler.step(optimizer)
             scaler.update()
-            clamp_parameters(model, config)
+            model.clamp_(config.get('clamp', {}))
 
             logged = {f'Parameters/{k}': v for k, v in model.scalar_parameters().items()}
             logged['Train/Loss'] = loss.item()
@@ -263,8 +237,14 @@ def train(config: Dict):
             pbar.set_postfix(Loss=f'{loss.item():.6f}')
             epoch_loss += loss.item()
 
-        wandb.log({'Train/Mean-Loss-Epoch': epoch_loss / len(train_dataloader),
-                   'Train/Epoch': epoch + 1})
+        logged = {
+            'Train/Mean-Loss-Epoch': epoch_loss / len(train_dataloader),
+            'Train/Epoch': epoch + 1,
+        }
+        logged.update({f'LR/{g["name"].split("/")[-1]}': g['lr'] for g in optimizer.param_groups})
+        wandb.log(logged)
+        
+        scheduler.step()
     
         if epoch % validate_every and epoch != epochs - 1:
             continue
@@ -289,6 +269,7 @@ def train(config: Dict):
             )
             torch.save({
                 'model': model.state_dict(), 'config': config,
+                'optimizer': optimizer.state_dict(),
                 'epoch': epoch, 'val_loss': val_loss,
             }, new_checkpoint)
             if best_checkpoint and os.path.exists(best_checkpoint):

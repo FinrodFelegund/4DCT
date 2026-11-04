@@ -1,5 +1,8 @@
 import torch
 
+from models.base import DenoisingModel
+
+
 def _redcnn2d(**kwargs):
     from models.RedCNN.red_cnn import REDCNN2D
     return REDCNN2D(**kwargs)
@@ -13,34 +16,21 @@ MODEL_BUILDERS = {
     'redcnn3d': _redcnn3d,
 }
 
-class CNN(torch.nn.Module):
-    def __init__(self, config):
+class CNN(DenoisingModel):
+    def __init__(self, stages):
         super().__init__()
-        model_type = config.get('type')
+        if len(stages) != 1 or int(stages[0].get('count', 1)) != 1:
+            raise ValueError(f'a CNN is a single stage with count 1, got {[s["type"] for s in stages]}')
+        spec = stages[0]
+        model_type = spec['type']
         if model_type not in MODEL_BUILDERS:
-            raise KeyError(f'Unknown model type {model_type!r}   '
-                           f'Known: {MODEL_BUILDERS}')
+            raise KeyError(f'Unknown model type {model_type!r}. Known: {sorted(MODEL_BUILDERS)}')
 
-        params = config.get('params', {})
-        network = MODEL_BUILDERS[model_type](**params)
-
-        self.model = network
+        self.model = MODEL_BUILDERS[model_type](**spec.get('params', [{}])[0])
         self.model_type = model_type
 
     def forward(self, x: torch.Tensor):
-        x = self.model(x)
-        return x
+        return self.model(x)
 
     def parameter_groups(self, lr):
-        if not hasattr(self.model, 'parameter_groups'):
-            raise TypeError(f'{self.model_type}: {type(self.model).__name__} has no parameter_groups(lr) function')
-
-        group = self.model.parameter_groups(lr)
-
-        return group
-
-    def scalar_parameters(self):
-        return {}
-
-    def regularisation(self):
-        return None
+        return self.model.parameter_groups(lr)

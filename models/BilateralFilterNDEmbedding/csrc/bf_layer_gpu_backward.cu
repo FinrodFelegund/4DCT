@@ -29,7 +29,8 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
                                                   const scalar_t* __restrict__ outputTensor,
                                                   const scalar_t* __restrict__ outputWeightsTensor,
                                                   const scalar_t* __restrict__ weightsTensor,
-                                                  int nParams,
+                                                  const int nParams,
+                                                  const bool computeInputGradient,
                                                   scalar_t* gradientOutputTensor,
                                                   scalar_t* dL_dsigma_t,
                                                   scalar_t* dL_dsigma_x,
@@ -62,7 +63,6 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
     int homeX = (homeOffsetSafe - homeT * cStridesBack[0]) / cStridesBack[1];
     int homeY = (homeOffsetSafe - homeT * cStridesBack[0] - homeX * cStridesBack[1]) / cStridesBack[2];
     int homeZ = (homeOffsetSafe - homeT * cStridesBack[0] - homeX * cStridesBack[1] - homeY * cStridesBack[2]) / cStridesBack[3];
-    int homeIndex[] = {homeT, homeX, homeY, homeZ};
 
     const bool homePadded = homeT < cPadTBack || homeT >= (cSizesBack[0] - cPadTBack);
 
@@ -135,7 +135,7 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
                         const scalar_t neighbourValue = inputTensor[neighbour];
                                     
                         scalar_t layerRegister[L + 1][H];
-                        scalar_t colorWeight = embeddingForwardRegistered<scalar_t, H, L, ACT>(network, homePart, neighbourValue, layerRegister);
+                        scalar_t colorWeight = embeddingForwardRegistered<scalar_t, H, L, ACT>(network, homePart, homeValue, neighbourValue, layerRegister);
                         scalar_t spatialWeight = gaussianT * gaussianX * gaussianY * gaussianZ;
                         scalar_t totalWeight = spatialWeight * colorWeight;
     
@@ -156,13 +156,12 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
                         //dY_k/dz_out
                         scalar_t dcolorWeight = valid ? (1 / W_k * (-O_k) * spatialWeight + 1 / W_k * neighbourValue * spatialWeight) * g_k : (scalar_t)0;
                 
-                        scalar_t embeddingInput[2] = { homeValue, neighbourValue };
                         scalar_t embeddingInputGradient[2] = { (scalar_t)0 };
-                        embeddingBackward<scalar_t, H, L, ACT>(network, embeddingInput, embeddingInputGradient, dcolorWeight, colorWeight, layerRegister, sGrad);
+                        embeddingBackward<scalar_t, H, L, ACT>(network, homeValue, neighbourValue, embeddingInputGradient, dcolorWeight, colorWeight, layerRegister, sGrad);
     
                         //dL/dX_k if k is the home voxel
                         //case m = k, meaning we take derivative with respect to home Voxel, at center we do this also for the second input to the filters
-                        if(valid){
+                        if(valid && computeInputGradient){
                             valueSum += embeddingInputGradient[0];
                             //atomic cause this neighbour voxel is homevoxel in a different thread
                             atomicAdd(&gradientOutputTensor[neighbour], embeddingInputGradient[1] + totalWeight * g_k * 1 / W_k);
@@ -179,7 +178,9 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
         dL_dsigma_y[home] = (1 / W_k) * (ySum_alpha - O_k * ySum_w) * g_k;
         dL_dsigma_z[home] = (1 / W_k) * (zSum_alpha - O_k * zSum_w) * g_k;
         //atomic cause this home voxel is neighbour voxel in a different thread
-        atomicAdd(&gradientOutputTensor[home], valueSum);
+        if(computeInputGradient){
+            atomicAdd(&gradientOutputTensor[home], valueSum);
+        }
     }
 
     //global flush of blocks network gradient
@@ -190,15 +191,13 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
             atomicAdd(&dL_dweights[i], v);
         }
     }
-    
-
 }
 
 template <int C, int D>
 void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor, torch::Tensor inputTensor,
                                          torch::Tensor outputTensor, torch::Tensor outputWeightsTensor,
-                                         float sigma_t, float sigma_x, float sigma_y, float sigma_z,
-                                         torch::Tensor weights, int hiddenWidth, int hiddenLength, int pad_t, int act,
+                                         float sigma_t, float sigma_x, float sigma_y, float sigma_z, torch::Tensor weights,
+                                         int hiddenWidth, int hiddenLength, int pad_t, int act, bool computeInputGradient,
                                          torch::Tensor gradientOutputTensor, torch::Tensor dL_dsig_t, torch::Tensor dL_dsig_x,
                                          torch::Tensor dL_dsig_y, torch::Tensor dL_dsig_z, torch::Tensor dL_dweights
                                         ){
@@ -206,12 +205,12 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor, torc
     TensorDescription desc = TensorDescription(inputTensor);
 
     int windowSizes[4];
-    windowSizes[0] = sigma_t ? 9 : 1;
+    windowSizes[0] = sigma_t ? 2 * pad_t + 1 : 1;
     windowSizes[1] = sigma_x ? std::max(((int)ceil(5.0f * sigma_x) | 1), 5) : 1;
     windowSizes[2] = sigma_y ? std::max(((int)ceil(5.0f * sigma_y) | 1), 5) : 1;
     windowSizes[3] = sigma_z ? std::max(((int)ceil(5.0f * sigma_z) | 1), 5) : 1;
 
-    TORCH_CHECK(windowSizes[1] <= MAX_WINDOW && windowSizes[2] <= MAX_WINDOW && windowSizes[3] <= MAX_WINDOW,
+    TORCH_CHECK(windowSizes[0] <= MAX_WINDOW && windowSizes[1] <= MAX_WINDOW && windowSizes[2] <= MAX_WINDOW && windowSizes[3] <= MAX_WINDOW,
                 "window size exceeds MAX_WINDOW (", MAX_WINDOW, ")");
 
     int halfWindowSizes[4];
@@ -271,6 +270,7 @@ void BilateralFilterCudaBackwardFunction(torch::Tensor gradientInputTensor, torc
             outputWeightsTensor.data_ptr<scalar_t>(),                                           \
             weights.data_ptr<scalar_t>(),                                                       \
             nParams,                                                                            \
+            computeInputGradient,                                                               \
             gradientOutputTensor.data_ptr<scalar_t>(),                                          \
             dL_dsig_t.data_ptr<scalar_t>(),                                                     \
             dL_dsig_x.data_ptr<scalar_t>(),                                                     \
@@ -326,7 +326,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
                                                                                                                                 int hiddenWidth,
                                                                                                                                 int hiddenLength,
                                                                                                                                 int pad_t,
-                                                                                                                                int act){
+                                                                                                                                int act,
+                                                                                                                                bool computeInputGradient){
   
 
     CHECK_CONTIGUOUS_CUDA(gradientInputTensor);
@@ -338,7 +339,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
     TORCH_CHECK(inputTensor.dim() == 6, "inputTensor must be [B, C, T, X, Y, Z].");
     TORCH_CHECK(inputTensor.size(1) == 1, "only one channel images are supported");
     TORCH_CHECK(hiddenLength >= 0, "hiddenLength must be >= 0");
-    TORCH_CHECK(weights.dim() == 1 && weights.numel() == 4 * hiddenWidth + 1 + hiddenLength * (hiddenWidth * hiddenWidth + hiddenWidth),
+    TORCH_CHECK(weights.dim() == 1 && weights.numel() == 4 * hiddenWidth + hiddenWidth + hiddenLength * (hiddenWidth * hiddenWidth + hiddenWidth) + hiddenWidth + 1,
                 "weights must be flat network (W_in | b_in | W_hidden | b_hidden | W_out | b_out) for width ",
                 hiddenWidth, " and ", hiddenLength, " hidden H * H layers, got ", weights.numel(), " values");
 
@@ -352,7 +353,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 
 #define CASE(c, d)                                                                                                          \
     BilateralFilterCudaBackwardFunction<c, d>(gradientInputTensor, inputTensor, outputTensor, outputWeightsTensor,          \
-                                          sigma_t, sigma_x, sigma_y, sigma_z, weights, hiddenWidth, hiddenLength, pad_t, act,    \
+                                          sigma_t, sigma_x, sigma_y, sigma_z, weights,                                      \
+                                          hiddenWidth, hiddenLength, pad_t, act, computeInputGradient,                      \
                                           gradientOutputTensor, dL_dsig_t, dL_dsig_x, dL_dsig_y, dL_dsig_z, dL_dweights);
     SWITCH_AB(CASE, BF_CUDA_MAX_CHANNELS, BF_CUDA_MAX_SPATIAL_DIMENSIONS, inputTensor.size(1), inputTensor.dim() - 2);
 #undef CASE

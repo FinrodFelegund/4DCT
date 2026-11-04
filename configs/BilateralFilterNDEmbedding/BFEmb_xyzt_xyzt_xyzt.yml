@@ -1,7 +1,9 @@
-name: BFEmb_xyzt-xyzt-xyzt
+name: BFEmb_xyzt_xyzt_xyzt
 train_data: /home/dpietsch/Data/.cache/Inhouse1Processed_v3
 parameter_dir: /home/dpietsch/4DCT/parameters
 epochs: 200
+resume: false
+resume_from: 
 amp: false
 validate_every: 8
 model:
@@ -9,10 +11,15 @@ model:
     - type: ndembedding
       count: 3
       params: [
-        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: leakyrelu},
-        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: leakyrelu},
-        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: leakyrelu},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: tanh, diff_scale: 40},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: tanh, diff_scale: 40},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: tanh, diff_scale: 40},
       ]
-optim: {lr_sp: 0.01, lr_t: 0.01, lr_embedding: 0.001}
+optimizer: 
+  class: Adam
+  learning_rates: {lr_sp: 0.01, lr_t: 0.01, lr_embedding: 0.001}
+scheduler:
+  class: CosineAnnealingLR
+  params: {eta_min: 1.0e-6, T_max: 200}
 clamp: {sigma_min: 0.01, sigma_max: 2.0}
-crop: {patch_size: [32, 64, 64], margin: [8, 8, 8], num_crops_train: 16, num_crops_validation: 8}
+crop: {patch_size: [32, 64, 64], margin: [6, 6, 6], num_crops_train: 8, num_crops_validation: 8}

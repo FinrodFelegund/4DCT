@@ -58,7 +58,9 @@ CALIBRATION_ROI_CENTERS = {
 }
 
 SIEMENS_ROI_CENTERS = {
-    '100%Dosis': {98, 285, 221}
+    '100%Dosis': (98, 285, 221),
+    '10%Dosis' : (98, 285, 221),
+    '2%Dosis'  : (98, 285, 221),
 }
 
 def roi_from_centre(d, r, c, size_z=8, size_xy=12):

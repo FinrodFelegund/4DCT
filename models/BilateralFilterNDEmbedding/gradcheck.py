@@ -22,7 +22,7 @@ torch.manual_seed(0)
 @torch.no_grad()
 def embedding(requires_grad=False):
     range_net = torch.nn.Sequential(
-        torch.nn.Linear(2, H, dtype=torch.double),
+        torch.nn.Linear(4, H, dtype=torch.double),
         *[torch.nn.Linear(H, H, dtype=torch.double) for _ in range(L)],
         torch.nn.Linear(H, 1, dtype=torch.double),
     )

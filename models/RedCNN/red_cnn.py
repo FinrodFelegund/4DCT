@@ -69,14 +69,10 @@ class REDCNN3D(torch.nn.Module):
 
     def parameter_groups(self, lr):
         return [
-            {'name': 'network', 'params': list(self.parameters()), 'lr': lr['network'], 'weight_decay': 0.0}
+            {'name': 'network', 'params': list(self.parameters()), 'lr': lr['network'], 'weight_decay': 1e-5}
         ]
 
-    def scalar_parameters(self):
-        return {}
 
-    def regularisation(self):
-        return None
 
 
 class REDCNN2D(torch.nn.Module):
