@@ -38,7 +38,7 @@ __global__ void BilateralFilterCudaKernelBackward(const scalar_t* __restrict__ g
                                                   scalar_t* dL_dsigma_z,
                                                   scalar_t* dL_dweights){
 
-    //since both the gradients with respect to the MLP weights are all writing in same memory adresses we give each block its private copy of the weights
+    //since both the gradients with respect to the MLP weights are all writing in same memory adresses we give each warp its private copy of the weights
     // and accumulate the gradients after each kernel finishes
 
     extern __shared__ unsigned char smemRaw[];

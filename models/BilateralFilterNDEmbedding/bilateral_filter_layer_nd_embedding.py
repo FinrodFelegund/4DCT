@@ -93,7 +93,7 @@ class BilateralFilterFunctionNdEmbeddingGPU(torch.autograd.Function):
 class BilateralFilterNdEmbedding(torch.nn.Module):
     def __init__(self, axes=('t', 'x', 'y', 'z'),
                  sigma_t=0.0, sigma_x=0.0, sigma_y=0.0, sigma_z=0.0,
-                 hidden_width=16, hidden_layers=2, activation="relu",
+                 hidden_width=16, hidden_layers=2, activation='relu',
                  diff_scale=40.0, use_gpu=True, **kwargs):
 
         super().__init__()
@@ -121,7 +121,7 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
         H = self.hidden_width
         L = self.hidden_layers
         self.range_net = torch.nn.Sequential(
-            torch.nn.Linear(4, self.hidden_width),
+            torch.nn.Linear(4, H),
             *[torch.nn.Linear(H, H) for _ in range(L)],
             torch.nn.Linear(H, 1),
         )
@@ -148,7 +148,7 @@ class BilateralFilterNdEmbedding(torch.nn.Module):
             parts += [torch.stack([l.weight for l in hidden]).reshape(-1),
                       torch.stack([l.bias for l in hidden]).reshape(-1)]
         parts += [last.weight.reshape(-1), last.bias]
-        return torch.cat(parts)
+        return torch.cat(parts).contiguous()
 
 
     def parameter_groups(self, lr):

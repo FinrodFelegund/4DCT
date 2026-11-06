@@ -154,11 +154,11 @@ class BilateralFilter4DLUT(torch.nn.Module):
             {"name": "lut", "params": [self.raw_lut], "lr": lr['lut'], "weight_decay": 0.0},
         ]
 
-    def forward(self, input_tensor: torch.Tensor):
-        assert input_tensor.dim() == 6, "Input must be shape [B, C, T, X, Y, Z]"
-        assert input_tensor.shape[1] == 1, "Currently only one channel images are supported"
+    def forward(self, x: torch.Tensor):
+        assert x.dim() == 6, "Input must be shape [B, C, T, X, Y, Z]"
+        assert x.shape[1] == 1, "Currently only one channel images are supported"
 
-        x = input_tensor.permute(0, 1, 2, 4, 5, 3).contiguous() / self.lut_max
+        x = x.permute(0, 1, 2, 4, 5, 3).contiguous() / self.lut_max
         x = pad_circulat_t(x, self.pad_t)
 
         kernel = self.kernel_weights().to(dtype=x.dtype)

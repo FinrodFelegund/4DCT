@@ -11,9 +11,9 @@ model:
     - type: ndembedding
       count: 3
       params: [
-        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: tanh, diff_scale: 40},
-        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: tanh, diff_scale: 40},
-        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 16, hidden_layers: 3, activation: tanh, diff_scale: 40},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 8, hidden_layers: 3, activation: tanh, diff_scale: 40},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 8, hidden_layers: 3, activation: tanh, diff_scale: 40},
+        {axes: ['x', 'y', 'z', 't'], sigma_t: 0.5, sigma_x: 0.5, sigma_y: 0.5, sigma_z: 0.5, hidden_width: 8, hidden_layers: 3, activation: tanh, diff_scale: 40},
       ]
 optimizer: 
   class: Adam
